@@ -32,7 +32,7 @@ def test_unknown_keys_fail_loudly(tmp_path: Path) -> None:
 def test_unsupported_ecosystem_is_an_error_with_a_hint(tmp_path: Path) -> None:
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "updatepilot.yml").write_text(
-        "ecosystems:\n  npm: {enabled: true}\n", encoding="utf-8"
+        "ecosystems:\n  cargo: {enabled: true}\n", encoding="utf-8"
     )
     with pytest.raises(ConfigError, match="路线图"):
         load_config(tmp_path)
@@ -41,7 +41,7 @@ def test_unsupported_ecosystem_is_an_error_with_a_hint(tmp_path: Path) -> None:
 def test_disable_an_ecosystem_with_false(tmp_path: Path) -> None:
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "updatepilot.yml").write_text(
-        "ecosystems:\n  pip: false\n", encoding="utf-8"
+        "ecosystems:\n  pip: false\n  npm: false\n", encoding="utf-8"
     )
     config = load_config(tmp_path)
     assert config.ecosystems["pip"].enabled is False
