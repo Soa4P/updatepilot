@@ -13,9 +13,10 @@ button stays yours.
 
 ## 它做什么
 
-1. **scan**：读你仓库的依赖清单（pip 的 `==` 精确钉版本、GitHub Actions 的版本 tag），
-   问注册表有什么新版本，按你的策略开更新 PR（major 单开 / minor+patch 分组 / ignore
-   名单 / 每轮上限）。
+1. **scan**：读你仓库的依赖清单（pip 的 `==` 精确钉版本、npm 的精确 pin、GitHub
+   Actions 的版本 tag），问注册表有什么新版本，按你的策略开更新 PR（major 单开 /
+   minor+patch 分组 / ignore 名单 / 每轮上限）——**上游 release notes 自动贴进 PR
+   body**（GitHub 托管仓库，best-effort；npm 的 PR body 同时提醒刷新 lockfile）。
 2. **自审**：每个 PR 开出后，立刻用完整文件审查引擎（逐文件读完整内容 + diff，分组
    模型调用 + 汇总裁决）审一遍，把结论、覆盖面表、分文件发现直接评论到 PR 上并打标。
 3. **review**（独立模式）：不开 PR，只当审查器用——任何 PR 都能审。
@@ -91,12 +92,13 @@ action 不碰——那是作者选的不可变性。
 
 ## English (short)
 
-UpdatePilot scans your dependency manifests (pip exact pins, GitHub Actions version
-tags), opens update PRs under your policy, and then runs a **full-file AI review** on
-every PR it just opened — complete file contents per group call, a coverage table, and
-deterministic downgrade rules (anything not fully read ⇒ `needs_review`, enforced in
-code). Egress is bounded to registries + one https-only model endpoint; secrets live in
-env vars, never in YAML. The bot never merges and never approves.
+UpdatePilot scans your dependency manifests (pip exact pins, npm exact pins, GitHub
+Actions version tags), opens update PRs under your policy — with **upstream release
+notes attached** (GitHub-hosted repos, best-effort) — and then runs a **full-file AI
+review** on every PR it just opened: complete file contents per group call, a coverage
+table, and deterministic downgrade rules (anything not fully read ⇒ `needs_review`,
+enforced in code). Egress is bounded to registries + one https-only model endpoint;
+secrets live in env vars, never in YAML. The bot never merges and never approves.
 
 ```yaml
 - uses: Soa4P/updatepilot@v1
@@ -106,10 +108,12 @@ env vars, never in YAML. The bot never merges and never approves.
     AI_REVIEW_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
 ```
 
+**建议用完整 SHA 钉住 `uses:`**（Action 安全惯例）：仓库页 latest release 附 commit
+SHA，或 `gh api repos/Soa4P/updatepilot/tags --jq '.[].commit.sha'` 取用。
+
 ## Roadmap
 
-- npm / cargo ecosystems（v1 支持 pip + github-actions）
-- 每轮扫描的 changelog 摘录（release notes 自动贴进 PR body）
+- cargo ecosystem
 - self-review 累积历史（同一依赖族的历史审查供汇总调用参考）
 
 ## License

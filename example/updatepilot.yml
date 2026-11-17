@@ -20,6 +20,17 @@ ecosystems:
     allow_major: false      # major 单开 PR 且默认拒绝——需要人工读 changelog
     group_minor_patch: true # minor/patch 打成一个 PR
 
+  # npm：package.json 里 dependencies/devDependencies 的精确 pin（"react": "18.2.0"）。
+  # 范围（^、~、*）与 dist-tag 不跟踪——同 pip 的浮动版本策略。本 PR 不改 lockfile，
+  # PR body 会提醒合并前运行 npm install。
+  npm:
+    enabled: true
+    manifests:
+      - package.json
+    ignore: []
+    allow_major: false
+    group_minor_patch: true
+
   # GitHub Actions：workflow 里的 uses: owner/action@ref（只跟版本 tag，SHA 钉住的不动）。
   github_actions:
     enabled: true

@@ -25,6 +25,8 @@ MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 
 _PYPI = "https://pypi.org/pypi/{name}/json"
 _GH_TAGS = "https://api.github.com/repos/{owner}/{repo}/tags"
+_GH_RELEASE = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
+_NPM = "https://registry.npmjs.org/{name}/latest"
 
 
 class RegistryError(RuntimeError):
@@ -138,3 +140,64 @@ def github_action_latest(action: str, token: str | None) -> str | None:
         if major > best_major:
             best_major, best_ref = major, f"v{major}"
     return best_ref
+
+
+def npm_latest(name: str) -> str | None:
+    """Latest published version for one npm package (the ``latest`` dist-tag)."""
+    body = _get_json(_NPM.format(name=urllib.parse.quote(name)))
+    if not isinstance(body, dict):
+        return None
+    version = str(body.get("version") or "").strip()
+    return version or None
+
+
+def npm_repository_slug(name: str) -> str | None:
+    """``owner/repo`` from the package's repository field, GitHub-hosted only.
+
+    The changelog fetch goes to api.github.com — an already-allowed host — so a
+    package whose repository points anywhere else simply gets no notes rather
+    than widening the egress set.
+    """
+    body = _get_json(_NPM.format(name=urllib.parse.quote(name)))
+    if not isinstance(body, dict):
+        return None
+    repo = body.get("repository")
+    if isinstance(repo, dict):
+        repo = repo.get("url")
+    if not isinstance(repo, str):
+        return None
+    match = re.search(r"github\.com[/:]([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$", repo)
+    return match.group(1) if match else None
+
+
+def github_latest_release_notes(slug: str, token: str | None) -> str | None:
+    """Body of the latest GitHub release for ``owner/repo``, bounded and plain.
+
+    Powers the changelog excerpt in bot PR bodies. Anything the API cannot
+    answer (rate limit, no releases, private) yields None — a PR without notes
+    is still a PR, not a failure.
+    """
+    owner, _, repo = slug.partition("/")
+    if not owner or not repo:
+        return None
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = _GH_RELEASE.format(owner=urllib.parse.quote(owner), repo=urllib.parse.quote(repo))
+    parsed = urllib.parse.urlparse(url)
+    _assert_routable_hostname(parsed.hostname)
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(request, timeout=REQUEST_TIMEOUT) as response:
+            raw = response.read(MAX_RESPONSE_BYTES)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
+        return None  # notes are best-effort by contract
+    try:
+        body = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    text = str(body.get("body") or "").strip()
+    return text[:1200] or None

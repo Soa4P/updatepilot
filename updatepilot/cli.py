@@ -15,13 +15,14 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from . import gh
 from .bumper import BumpError, apply_edits
 from .config import BotConfig, load_config, resolve_api_key, resolve_base_url
 from .gh import GitError
-from .planner import ScanReport, fetch_latest_versions, plan_scan
+from .planner import ScanReport, attach_release_notes, fetch_latest_versions, plan_scan
 from .review import ReviewOptions, ReviewTarget, review_target
 
 LABEL_COLORS = {
@@ -133,9 +134,29 @@ def _review_options(config: BotConfig, api_key: str) -> ReviewOptions:
     )
 
 
+def _branch_tree(cwd: Path, branch: str, temp_dir: Path) -> Path:
+    """Materialise a pushed branch as text (git archive | tar -x) — the review
+    reads exactly what was committed, not whatever the working tree later
+    becomes. Same text-only contract as _pr_tree."""
+    tree = temp_dir / "branch-tree"
+    tree.mkdir(parents=True, exist_ok=True)
+    archive = tree / "_archive.tar"
+    with archive.open("wb") as handle:
+        subprocess.run(
+            ["git", "archive", gh.validate_branch(branch)], cwd=cwd, check=True, stdout=handle,
+        )
+    subprocess.run(
+        ["tar", "-xf", str(archive), "-C", str(tree)],
+        cwd=cwd, capture_output=True, text=True, shell=False, check=True,
+    )
+    archive.unlink()
+    return tree
+
+
 def _scan(repo_root: Path) -> int:
     config = load_config(repo_root)
     report = _scan_report(repo_root, config)
+    attach_release_notes(report, github_token=os.environ.get("GITHUB_TOKEN"))
     _render_report(report)
     api_key = resolve_api_key(config.review)
     options = _review_options(config, api_key)
@@ -163,16 +184,21 @@ def _scan(repo_root: Path) -> int:
         verdict = "needs_review"
         if api_key:
             diff = _diff_of_edits(repo_root, planned, base_branch)
-            review = review_target(
-                ReviewTarget(
-                    diff=diff,
-                    changed_files=sorted(planned.edits),
-                    tree_root=repo_root,
-                    title=planned.title,
-                    body="\n".join(planned.body_lines),
-                ),
-                options,
-            )
+            # Review the PUSHED branch content, not the working tree: between
+            # this PR's commit and the review, nothing may silently drift — and
+            # the next loop iteration's checkout_base would reset the tree.
+            with tempfile.TemporaryDirectory() as temp:
+                tree = _branch_tree(repo_root, planned.branch, Path(temp))
+                review = review_target(
+                    ReviewTarget(
+                        diff=diff,
+                        changed_files=sorted(planned.edits),
+                        tree_root=tree,
+                        title=planned.title,
+                        body="\n".join(planned.body_lines),
+                    ),
+                    options,
+                )
             verdict = review["verdict"]
             comment = render_verdict(review)
         else:
@@ -190,8 +216,6 @@ def _scan(repo_root: Path) -> int:
 
 def _review(repo_root: Path) -> int:
     """Standalone review mode for adopters who only want the reviewer."""
-    import tempfile
-
     raw_number = os.environ.get("PR_NUMBER", "")
     if not raw_number.isdigit():
         _print("review 模式需要 PR_NUMBER 环境变量")

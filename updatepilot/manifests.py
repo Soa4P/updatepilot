@@ -145,4 +145,63 @@ def read_manifests(repo_root: Path, ecosystem: str, manifests: list[str]) -> lis
         return pins
     if ecosystem == "github_actions":
         return read_action_refs(repo_root, manifests or [".github/workflows"])
+    if ecosystem == "npm":
+        pins = []
+        for manifest in manifests or ["package.json"]:
+            if (repo_root / manifest).is_file():
+                pins.extend(read_npm_pins(repo_root, manifest))
+        return pins
     return []
+
+
+def read_npm_pins(repo_root: Path, manifest: str) -> list[PinnedDependency]:
+    """Read exact-pinned entries from ``package.json``.
+
+    Only ``dependencies`` / ``devDependencies`` entries with EXACT versions
+    (``"react": "18.2.0"``) are tracked — ranges (``^1.0.0``, ``~2.3``, ``*``)
+    are the author's floating contract, same policy as pip. Line numbers come
+    from a block-scoped scan (depth-tracking braces), not JSON parsing: the
+    bumper rewrites by line, and a re-serialized JSON would reformat the file.
+    """
+    path = repo_root / manifest
+    if not path.is_file():
+        return []
+    text = path.read_text(encoding="utf-8", errors="replace")
+    pins: list[PinnedDependency] = []
+    # Block-scope tracking: scope opens when "dependencies"/"devDependencies"
+    # opens (depth increases on that line) and closes when depth drops back
+    # below the recorded level. JSON has no comments, so depth counting is exact.
+    scope: str | None = None
+    scope_depth = 0
+    depth = 0
+    # Exact semver only, encoded in the pin group itself (not a lookahead): the
+    # closing quote right after the group enforces the full match, and ranges
+    # (^1.2.3, 1.2.x, *, next) simply fail to match.
+    line_re = re.compile(
+        r'^(\s*)"(?P<name>[^"]+)"\s*:\s*"(?P<pin>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)"\s*,?\s*$'
+    )
+    block_re = re.compile(r'^"([^"]+)"\s*:\s*\{\s*$')
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        stripped = raw.strip()
+        new_depth = depth + stripped.count("{") - stripped.count("}")
+        if scope is not None and new_depth < scope_depth:
+            scope = None
+        key = block_re.match(stripped)
+        if key and key.group(1) in ("dependencies", "devDependencies") and new_depth > depth:
+            scope = key.group(1)
+            scope_depth = new_depth
+        depth = new_depth
+        if scope is None:
+            continue
+        match = line_re.match(raw.rstrip("\n"))
+        if not match:
+            continue
+        name = match.group("name")
+        if name == scope:
+            continue
+        pins.append(PinnedDependency(
+            ecosystem="npm", name=name.lower(), current=match.group("pin"),
+            file=manifest, line=lineno, kind="npm",
+            replace_span=_span_for(raw.rstrip("\n"), match, "pin"),
+        ))
+    return pins

@@ -176,6 +176,15 @@ def _single_pr(update: Update, config: BotConfig) -> PlannedPR:
         "",
         f"文件：`{update.pin.file}` 第 {update.pin.line} 行",
         "",
+    ]
+    if update.pin.ecosystem == "npm":
+        # The bot edits the manifest, never the lockfile — say so, or a lockfile-
+        # enforcing CI fails in a way that reads like the bot broke the build.
+        pr.body_lines += [
+            "合并前请运行 `npm install` 刷新 lockfile（本 PR 不改 lock 文件）。",
+            "",
+        ]
+    pr.body_lines += [
         "本 PR 由 UpdatePilot 开出，并已附带完整文件 AI 审查（见下方评论）；",
         "合并决定仍由维护者做出。",
     ]
@@ -192,6 +201,11 @@ def _fill_group_pr(pr: PlannedPR, config: BotConfig) -> None:
         "",
     ]
     pr.body_lines.extend(f"- `{u.pin.name}` `{u.pin.current}` → `{u.latest}`（{u.level}）" for u in pr.updates)
+    if pr.ecosystem == "npm":
+        pr.body_lines += [
+            "",
+            "合并前请运行 `npm install` 刷新 lockfile（本 PR 不改 lock 文件）。",
+        ]
     pr.body_lines += [
         "",
         "本 PR 由 UpdatePilot 开出，并已附带完整文件 AI 审查（见下方评论）；",
@@ -209,7 +223,7 @@ def fetch_latest_versions(
     Registry failures are swallowed into None (the planner reports them as
     skipped) because one unreachable package must not stop the other thirty.
     """
-    from .registries import github_action_latest, pypi_latest
+    from .registries import github_action_latest, npm_latest, pypi_latest
 
     lookup: dict[str, str | None] = {}
     seen: set[str] = set()
@@ -223,6 +237,8 @@ def fetch_latest_versions(
                 lookup[key] = pypi_latest(pin.name)
             elif pin.ecosystem == "github_actions":
                 lookup[key] = github_action_latest(pin.name, github_token)
+            elif pin.ecosystem == "npm":
+                lookup[key] = npm_latest(pin.name)
             else:
                 lookup[key] = None
         except RegistryError as exc:
@@ -230,3 +246,54 @@ def fetch_latest_versions(
             # The reason lands in the scan report via a marker key the caller reads.
             lookup[f"{key}:error"] = str(exc)
     return lookup
+
+
+def attach_release_notes(
+    report: ScanReport,
+    *,
+    github_token: str | None = None,
+) -> None:
+    """Best-effort changelog excerpts into every planned PR's body.
+
+    Sources stay inside the already-allowed egress set: actions resolve their
+    own ``owner/repo``; npm packages resolve a GitHub-hosted ``repository`` from
+    the registry record (anything else gets no notes, not a new outbound host).
+    pip has no reliable package→repo mapping in v1 — its PR body points at the
+    PyPI release page instead. Notes are cosmetic: a failure yields no notes,
+    never a failed scan.
+    """
+    from .registries import github_latest_release_notes, npm_repository_slug
+
+    for pr in report.planned:
+        for update in pr.updates:
+            slug: str | None = None
+            if update.pin.ecosystem == "github_actions":
+                slug = update.pin.name
+            elif update.pin.ecosystem == "npm":
+                try:
+                    slug = npm_repository_slug(update.pin.name)
+                except RegistryError:
+                    slug = None
+            notes = None
+            if slug:
+                try:
+                    notes = github_latest_release_notes(slug, github_token)
+                except RegistryError:
+                    notes = None
+            if notes:
+                pr.body_lines += [
+                    "",
+                    f"**{update.pin.name}** `{update.pin.current}` → `{update.latest}` 上游发布说明（best-effort）：",
+                    "",
+                    notes,
+                ]
+            elif update.pin.ecosystem == "pip":
+                pr.body_lines += [
+                    "",
+                    f"- [{update.pin.name} 版本页](https://pypi.org/project/{update.pin.name}/{update.latest}/)（pip 无稳定的包→仓库映射，未附 release notes）",
+                ]
+            elif update.pin.ecosystem == "npm":
+                pr.body_lines += [
+                    "",
+                    f"- `{update.pin.name}`：仓库未托管在 GitHub 或未声明 repository，未附 release notes。合并前请运行 `npm install` 刷新 lockfile（本 PR 不改 lock 文件）。",
+                ]

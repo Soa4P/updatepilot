@@ -19,8 +19,8 @@ CONFIG_PATH = ".github/updatepilot.yml"
 #: ecosystems shipped in v1. npm and cargo are on the roadmap; unknown keys are
 #: reported as errors rather than silently ignored (a typo'd ecosystem name must
 #: not look like "nothing to update").
-SUPPORTED_ECOSYSTEMS = ("pip", "github_actions")
-ROADMAP_ECOSYSTEMS = ("npm", "cargo")
+SUPPORTED_ECOSYSTEMS = ("pip", "npm", "github_actions")
+ROADMAP_ECOSYSTEMS = ("cargo",)
 
 #: Per-run ceilings. The scan job holds the user's API key; these bounds exist so a
 #: pathological manifest cannot turn into 500 registry calls or an open wallet.
@@ -98,6 +98,13 @@ def default_config() -> BotConfig:
             "pip": EcosystemConfig(
                 manifests=["requirements.txt", "requirements-dev.txt"],
             ),
+            # Only exact pins ("react": "18.2.0") are tracked; ranges are the
+            # author's floating contract. Lockfiles are the repo's own CI duty —
+            # the bot notes it in the PR body instead of touching the lock.
+            "npm": EcosystemConfig(
+                manifests=["package.json"],
+                group_minor_patch=True,
+            ),
             "github_actions": EcosystemConfig(
                 allow_major=True,  # action majors are runtime updates; skipping them misses security fixes
                 group_minor_patch=False,
@@ -121,9 +128,19 @@ def _merge_ecosystem(name: str, raw: Any, errors: list[str]) -> EcosystemConfig:
     for key in raw:
         if key not in known:
             errors.append(f"ecosystems.{name}.{key}: 未知字段（可用：{', '.join(sorted(known))}）")
+    manifests = [str(m) for m in raw.get("manifests", base.manifests)]
+    for manifest in manifests:
+        # Load-time containment (audit P2-1): a manifest path is joined onto the
+        # repo root everywhere downstream; an absolute path or ".." must fail at
+        # config parse, not surface later as a bumper/reviewer refusal.
+        candidate = Path(manifest)
+        if candidate.is_absolute() or ".." in candidate.parts or manifest.startswith(("/", "\\")):
+            errors.append(
+                f"ecosystems.{name}.manifests: 路径必须在仓库根内（拒绝 {manifest!r}）"
+            )
     merged = EcosystemConfig(
         enabled=bool(raw.get("enabled", base.enabled)),
-        manifests=[str(m) for m in raw.get("manifests", base.manifests)],
+        manifests=manifests,
         ignore=[str(i) for i in raw.get("ignore", base.ignore)],
         allow_major=bool(raw.get("allow_major", base.allow_major)),
         group_minor_patch=bool(raw.get("group_minor_patch", base.group_minor_patch)),
