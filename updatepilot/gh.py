@@ -67,7 +67,7 @@ def default_branch(cwd: Path) -> str:
 def checkout_base(cwd: Path) -> None:
     """Detach onto the default branch's remote head — never commit to a local branch."""
     _run(["git", "fetch", "origin", "--quiet"], cwd=cwd)
-    branch = default_branch(cwd)
+    branch = validate_branch(default_branch(cwd))
     _run(["git", "checkout", "--detach", f"origin/{branch}", "--quiet"], cwd=cwd)
 
 
@@ -90,7 +90,7 @@ def create_branch_and_commit(
 def open_pr(cwd: Path, *, title: str, body: str, branch: str, base: str | None = None) -> int:
     """Create the PR and return its number."""
     branch = validate_branch(branch)
-    base = base or default_branch(cwd)
+    base = validate_branch(base or default_branch(cwd))
     result = _run(
         ["gh", "pr", "create", "--title", title, "--body", body,
          "--head", branch, "--base", base],

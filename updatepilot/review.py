@@ -208,7 +208,11 @@ def collect_file_entries(
                                      fully_read=False))
             continue
         if not resolved.is_file():
-            deleted = hunks_by_path.get(path, "").count("\n-") > 0
+            # True deletions are marked structurally (`+++ /dev/null`). Counting
+            # "-" lines would match the "\n--- a/…" header every real diff section
+            # carries, classifying EVERY tree-missing file as deleted and
+            # defeating the not-fully-read downgrade.
+            deleted = "\n+++ /dev/null" in hunks_by_path.get(path, "")
             entries.append(FileEntry(
                 path=path, mode="diff_only",
                 reason="" if deleted else "PR 侧文件缺失",
@@ -373,7 +377,9 @@ def call_model(
         opener = _opener or urllib.request.build_opener(_NoRedirect())
         with opener.open(request, timeout=timeout) as response:
             status = getattr(response, "status", 0)
-            raw = response.read()
+            # Cap the read: a hostile or misconfigured endpoint answering
+            # gigabytes fails loudly instead of exhausting the runner.
+            raw = response.read(10 * 1024 * 1024)
     except urllib.error.HTTPError as exc:
         snippet = exc.read()[:300].decode("utf-8", "replace")
         raise ReviewError(f"model returned HTTP {exc.code} (body: {snippet!r})") from exc

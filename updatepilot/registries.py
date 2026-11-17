@@ -19,6 +19,9 @@ import urllib.request
 
 USER_AGENT = "updatepilot/1.0 (+https://github.com/Soa4P/updatepilot)"
 REQUEST_TIMEOUT = 30.0
+#: Response cap: a registry (or something impersonating one) answering gigabytes
+#: must fail loudly, not exhaust the runner's memory.
+MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 
 _PYPI = "https://pypi.org/pypi/{name}/json"
 _GH_TAGS = "https://api.github.com/repos/{owner}/{repo}/tags"
@@ -59,7 +62,7 @@ def _get_json(url: str) -> dict | list | None:
     try:
         opener = urllib.request.build_opener(_NoRedirect())
         with opener.open(request, timeout=REQUEST_TIMEOUT) as response:
-            raw = response.read()
+            raw = response.read(MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
@@ -107,7 +110,7 @@ def github_action_latest(action: str, token: str | None) -> str | None:
     try:
         opener = urllib.request.build_opener(_NoRedirect())
         with opener.open(request, timeout=REQUEST_TIMEOUT) as response:
-            raw = response.read()
+            raw = response.read(MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 429):
             raise RegistryError(f"GitHub API rate limited while reading {action}") from exc

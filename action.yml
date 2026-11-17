@@ -26,16 +26,28 @@ runs:
         python-version: "3.12"
 
     - name: Install UpdatePilot
+      # action_ref is the ref the caller used in `uses:`; interpolated via env,
+      # not into the script text — action inputs are untrusted by convention.
       shell: bash
-      run: pip install "git+${{ github.server_url }}/${{ github.action_repository }}.git@${{ github.action_ref || 'main' }}"
+      env:
+        UPDATEPILOT_SOURCE: git+${{ github.server_url }}/${{ github.action_repository }}.git@${{ github.action_ref }}
+      run: pip install "$UPDATEPILOT_SOURCE"
 
     - name: Run
       shell: bash
+      # `mode` is an action input = caller-controlled text. It reaches the shell
+      # ONLY through the env block: `updatepilot ${{ inputs.mode }}` would let a
+      # caller's untrusted value (e.g. a branch name in their automation) inject
+      # arbitrary commands with this job's GITHUB_TOKEN and API key in scope.
       env:
+        UPDATEPILOT_MODE: ${{ inputs.mode }}
         GITHUB_TOKEN: ${{ inputs.github_token }}
         UPDATEPILOT_REPO: ${{ github.workspace }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
       run: |
-        updatepilot ${{ inputs.mode }}
+        case "$UPDATEPILOT_MODE" in
+          scan|review) updatepilot "$UPDATEPILOT_MODE" ;;
+          *) echo "::error::mode 必须是 scan 或 review，收到: $UPDATEPILOT_MODE"; exit 1 ;;
+        esac

@@ -41,7 +41,10 @@ class PinnedDependency:
     replace_span: tuple[str, str]  # (old_text, template) — template has {pin}
 
     def render(self, new_pin: str) -> str:
-        return self.replace_span[1].format(pin=new_pin)
+        # replace, not str.format: the template is the ORIGINAL line, and any
+        # other braces on it (a comment containing "{docs}") would crash format
+        # or resolve unintended placeholders.
+        return self.replace_span[1].replace("{pin}", new_pin)
 
 
 def _span_for(line_text: str, match: re.Match, pin_group: str) -> tuple[str, str]:
