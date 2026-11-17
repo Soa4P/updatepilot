@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "updatepilot"
+version = "1.0.0"
+description = "Dependency update bot whose every PR arrives pre-reviewed by a full-file AI review."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Soa4P" }]
+keywords = ["github-action", "dependencies", "code-review", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "packaging>=23.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+updatepilot = "updatepilot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["updatepilot*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

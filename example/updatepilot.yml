@@ -1,0 +1,44 @@
+# UpdatePilot 配置（放在你的仓库的 .github/updatepilot.yml；本文件是完整示例）
+# Optional — without this file the defaults below apply.
+version: 1
+
+# 一轮扫描最多开多少个 PR（超出部分进报告，不静默丢弃）。
+max_prs_per_run: 5
+
+# bot 的分支前缀：updatepilot/pip/pytest-9.3.0
+branch_prefix: updatepilot
+
+ecosystems:
+  # Python：requirements*.txt / pyproject.toml 里的 `==` 精确钉版本。
+  # 漂浮版本（>=、~=）不跟踪——bot 只管钉死的版本，不替你做范围决策。
+  pip:
+    enabled: true
+    manifests:
+      - requirements.txt
+      - requirements-dev.txt
+    ignore: []              # 这些名字永不升级
+    allow_major: false      # major 单开 PR 且默认拒绝——需要人工读 changelog
+    group_minor_patch: true # minor/patch 打成一个 PR
+
+  # GitHub Actions：workflow 里的 uses: owner/action@ref（只跟版本 tag，SHA 钉住的不动）。
+  github_actions:
+    enabled: true
+    allow_major: true       # action 的 major 通常是运行时升级，安全修复多在这里
+    group_minor_patch: false
+    manifests:
+      - .github/workflows
+
+review:
+  # 任意 OpenAI 兼容端点。key 从环境变量名读取（不是值！），secrets 不进这个文件。
+  model: deepseek-chat
+  base_url_env: AI_REVIEW_BASE_URL        # 缺省 https://api.deepseek.com
+  api_key_env: AI_REVIEW_API_KEY
+  language: zh                             # zh | en —— 审查评论的语言
+
+  # 你自己的安全关键路径：审查优先、永不跳过、未完整读取即 needs_review。
+  critical_paths:
+    - src/myapp/auth/
+    - .github/workflows/
+
+  # 额外的生成物前缀（内置已有 node_modules/dist/build/vendor 等）。
+  generated_prefixes: []

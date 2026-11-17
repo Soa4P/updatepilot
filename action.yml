@@ -1,0 +1,41 @@
+name: "UpdatePilot"
+description: >-
+  Dependency update bot whose every PR arrives pre-reviewed by a full-file AI
+  review. Scan mode opens update PRs under your policy; review mode attaches the
+  verdict comment and label. The bot never merges and never approves.
+author: "Soa4P"
+
+branding:
+  icon: "navigation"
+  color: "blue"
+
+inputs:
+  mode:
+    description: "scan (open pre-reviewed update PRs) or review (review PR_NUMBER)"
+    required: true
+  github_token:
+    description: "Token for branch/PR/label API calls; pass secrets.GITHUB_TOKEN"
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install UpdatePilot
+      shell: bash
+      run: pip install "git+${{ github.server_url }}/${{ github.action_repository }}.git@${{ github.action_ref || 'main' }}"
+
+    - name: Run
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        UPDATEPILOT_REPO: ${{ github.workspace }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+      run: |
+        updatepilot ${{ inputs.mode }}

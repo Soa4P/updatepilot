@@ -1,0 +1,242 @@
+"""The CLI the GitHub Action invokes: ``updatepilot scan`` / ``updatepilot review``.
+
+``scan`` is the full loop: read manifests, ask registries, plan PRs under the
+repo's policy; then for each planned PR: create branch, commit, push, open PR,
+and immediately run the full-file review on its own PR. The human sees every PR
+with its review already attached.
+
+``review`` is the standalone review mode, for adopters who only want the
+reviewer. It needs ``PR_NUMBER`` in the environment.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from . import gh
+from .bumper import BumpError, apply_edits
+from .config import BotConfig, load_config, resolve_api_key, resolve_base_url
+from .gh import GitError
+from .planner import ScanReport, fetch_latest_versions, plan_scan
+from .review import ReviewOptions, ReviewTarget, review_target
+
+LABEL_COLORS = {
+    "ai:safe": "0E8A16",
+    "ai:needs-review": "FBCA04",
+    "ai:malicious": "B60205",
+}
+
+
+def _print(message: str) -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    print(message)
+
+
+def _pr_tree(cwd: Path, number: int, temp_dir: Path) -> Path:
+    """Materialise the PR head tree as text (git archive then tar -x)."""
+    tree = temp_dir / "pr-tree"
+    tree.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "fetch", "--depth=1", "origin", f"refs/pull/{number}/head"],
+        cwd=cwd, capture_output=True, text=True, shell=False, check=True,
+    )
+    archive = tree / "_archive.tar"
+    with archive.open("wb") as handle:
+        subprocess.run(
+            ["git", "archive", "FETCH_HEAD"], cwd=cwd, check=True, stdout=handle,
+        )
+    subprocess.run(
+        ["tar", "-xf", str(archive), "-C", str(tree)],
+        cwd=cwd, capture_output=True, text=True, shell=False, check=True,
+    )
+    archive.unlink()
+    return tree
+
+
+def _pr_diff_and_files(cwd: Path, number: int) -> tuple[str, list[str]]:
+    diff = subprocess.run(
+        ["gh", "pr", "diff", str(number)], cwd=cwd, capture_output=True,
+        text=True, encoding="utf-8", errors="replace", shell=False, check=True,
+    ).stdout
+    names_raw = subprocess.run(
+        ["gh", "pr", "diff", str(number), "--name-only"], cwd=cwd,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        shell=False, check=True,
+    ).stdout
+    names = [line.strip() for line in names_raw.splitlines() if line.strip()]
+    return diff, names
+
+
+def _diff_of_edits(repo_root: Path, planned, base: str) -> str:
+    """The diff of the bot's own commit — identical to the PR diff."""
+    result = subprocess.run(
+        ["git", "diff", f"origin/{base}", planned.branch, "--"],
+        cwd=repo_root, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", shell=False, check=True,
+    )
+    return result.stdout
+
+
+def verdict_label(verdict: str) -> str:
+    return {"safe": "ai:safe", "needs_review": "ai:needs-review",
+            "malicious": "ai:malicious"}[verdict]
+
+
+def render_verdict(review: dict) -> str:
+    from .review import render_comment
+
+    return render_comment(review, language="zh")
+
+
+def _scan_report(repo_root: Path, config: BotConfig) -> ScanReport:
+    from .manifests import read_manifests
+
+    pins: list = []
+    for eco in config.enabled_ecosystems:
+        pins.extend(read_manifests(repo_root, eco, config.ecosystems[eco].manifests))
+    token = os.environ.get("GITHUB_TOKEN")
+    lookup = fetch_latest_versions(pins, github_token=token)
+    return plan_scan(repo_root, config, lookup, github_token=token)
+
+
+def _render_report(report: ScanReport) -> None:
+    _print(f"计划开 {len(report.planned)} 个 PR")
+    for pr in report.planned:
+        _print(f"  - {pr.title}")
+    for line in report.deferred:
+        _print(f"⏸ {line}")
+    for line in report.skipped[:20]:
+        _print(f"⏭ {line}")
+    for line in report.errors:
+        _print(f"✗ {line}")
+
+
+def _review_options(config: BotConfig, api_key: str) -> ReviewOptions:
+    review = config.review
+    return ReviewOptions(
+        api_key=api_key,
+        model=review.model,
+        base_url=resolve_base_url(review),
+        max_tokens=review.max_tokens,
+        retry_max_tokens=review.retry_max_tokens,
+        file_max_tokens=review.file_max_tokens,
+        file_retry_max_tokens=review.file_retry_max_tokens,
+        max_calls=review.max_calls,
+        critical_paths=tuple(review.critical_paths),
+        extra_generated=tuple(review.generated_prefixes),
+        language=review.language,
+    )
+
+
+def _scan(repo_root: Path) -> int:
+    config = load_config(repo_root)
+    report = _scan_report(repo_root, config)
+    _render_report(report)
+    api_key = resolve_api_key(config.review)
+    options = _review_options(config, api_key)
+    base_branch = gh.default_branch(repo_root)
+    opened: list[tuple[int, str]] = []
+
+    for planned in report.planned:
+        if config.dry_run:
+            _print(f"[dry-run] would open: {planned.title}")
+            continue
+        try:
+            gh.checkout_base(repo_root)
+            touched = apply_edits(repo_root, planned)
+            gh.create_branch_and_commit(repo_root, planned.branch, planned.title, touched)
+            number = gh.open_pr(
+                repo_root,
+                title=planned.title,
+                body="\n".join(planned.body_lines),
+                branch=planned.branch,
+                base=base_branch,
+            )
+        except (GitError, BumpError) as exc:
+            _print(f"⚠ {planned.title}: {exc}")
+            continue
+        verdict = "needs_review"
+        if api_key:
+            diff = _diff_of_edits(repo_root, planned, base_branch)
+            review = review_target(
+                ReviewTarget(
+                    diff=diff,
+                    changed_files=sorted(planned.edits),
+                    tree_root=repo_root,
+                    title=planned.title,
+                    body="\n".join(planned.body_lines),
+                ),
+                options,
+            )
+            verdict = review["verdict"]
+            comment = render_verdict(review)
+        else:
+            comment = "未配置审查模型 key；本 PR 未经过 AI 审查，请人工审查。"
+        try:
+            gh.comment_on_pr(repo_root, number, comment)
+            gh.label_pr(repo_root, number, verdict_label(verdict),
+                        LABEL_COLORS[verdict_label(verdict)])
+        except GitError as exc:
+            _print(f"⚠ PR #{number} 评论/打标失败：{exc}")
+        opened.append((number, verdict))
+    _print(f"完成：{len(opened)} 个 PR 已开出并附审查。")
+    return 0
+
+
+def _review(repo_root: Path) -> int:
+    """Standalone review mode for adopters who only want the reviewer."""
+    import tempfile
+
+    raw_number = os.environ.get("PR_NUMBER", "")
+    if not raw_number.isdigit():
+        _print("review 模式需要 PR_NUMBER 环境变量")
+        return 2
+    number = int(raw_number)
+    config = load_config(repo_root)
+    api_key = resolve_api_key(config.review)
+    if not api_key:
+        _print(f"未配置 {config.review.api_key_env}；没有进行审查，请人工审查。")
+        return 0
+    diff, names = _pr_diff_and_files(repo_root, number)
+    options = _review_options(config, api_key)
+    with tempfile.TemporaryDirectory() as temp:
+        tree = _pr_tree(repo_root, number, Path(temp))
+        review = review_target(
+            ReviewTarget(
+                diff=diff,
+                changed_files=names,
+                tree_root=tree,
+                title=os.environ.get("PR_TITLE", ""),
+                body=os.environ.get("PR_BODY", ""),
+            ),
+            options,
+        )
+    try:
+        gh.comment_on_pr(repo_root, number, render_verdict(review))
+        label = verdict_label(review["verdict"])
+        gh.label_pr(repo_root, number, label, LABEL_COLORS[label])
+    except GitError as exc:
+        _print(f"⚠ PR #{number} 评论/打标失败：{exc}")
+    _print(json.dumps({"verdict": review["verdict"], "degraded": review["degraded"]}))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command = argv[0] if argv else ""
+    repo_root = Path(os.environ.get("UPDATEPILOT_REPO", ".")).resolve()
+    if command == "scan":
+        return _scan(repo_root)
+    if command == "review":
+        return _review(repo_root)
+    _print("用法：updatepilot scan | updatepilot review（review 需要 PR_NUMBER）")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
