@@ -38,7 +38,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write          # 开分支/推提交——最小集，不要给起 workflow 或 admin
   pull-requests: write
 
 jobs:
