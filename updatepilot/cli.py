@@ -37,6 +37,7 @@ from .config import (
     resolve_api_key,
     resolve_base_url,
 )
+from .coverage import coverage_section
 from .gh import GitError
 from .inline import build_inline_comments
 from .planner import ScanReport, attach_release_notes, fetch_latest_versions, plan_scan
@@ -269,6 +270,10 @@ def _review(repo_root: Path) -> int:
         # 行级内联评论：location 是纯行号且落在变更行内才锚——其余留在汇总里。
         inline = build_inline_comments(review.get("findings", []), diff)
     body = render_verdict(review)
+    # coverage.json 由调用方的 CI 生成（bot 读不跑）；存在即标注变更行的未覆盖。
+    coverage_block = coverage_section(repo_root, diff)
+    if coverage_block:
+        body += "\n\n" + coverage_block
     if inline:
         _print(f"内联评论 {len(inline)} 条（其余留在汇总）。")
     try:
