@@ -622,47 +622,10 @@ def review_target(target: ReviewTarget, options: ReviewOptions) -> dict:
         entry.fully_read = False
         entry.reason = "超出单 PR 分组调用预算，只看了 diff"
 
-    reviewed: list[FileEntry] = []
-    for group in groups:
-        # Every group's entries flow into the synthesis report regardless of the
-        # call's outcome — a failed group is marked (not dropped), which is what
-        # the deterministic downgrade below reads.
-        reviewed.extend(group)
-        try:
-            raw = _call_with_retry(
-                _group_prompt(group, options.language),
-                api_key=options.api_key, model=options.model, base_url=options.base_url,
-                max_tokens=options.file_max_tokens,
-                retry_max_tokens=options.file_retry_max_tokens,
-                system_prompt=FILES_SYSTEM_PROMPT.replace("{language}",
-                    "Chinese (中文)" if options.language != "en" else "English"),
-            )
-            payload = _extract_group_payload(raw)
-            answered = {
-                str(item.get("file", "")).strip(): item
-                for item in (payload.get("files") or [])
-                if isinstance(item, dict)
-            }
-        except ReviewError as exc:
-            for entry in group:
-                entry.fully_read = False
-                if entry.mode == "full":
-                    entry.mode = "partial"
-                    entry.reason = f"分组审查调用失败：{exc}"
-            continue
-        for entry in group:
-            item = answered.get(entry.path)
-            if item is None:
-                entry.fully_read = False
-                if entry.mode == "full":
-                    entry.mode = "partial"
-                    entry.reason = "分组审查没有覆盖该文件"
-                continue
-            entry.findings = _normalise_findings(item)
-            if item.get("fully_read") is False and entry.mode == "full":
-                entry.mode = "partial"
-                entry.reason = "分组审查自报未完整读取"
-                entry.fully_read = False
+    reviewed = review_file_groups(
+        groups, api_key=options.api_key, model=options.model,
+        base_url=options.base_url, options=options,
+    )
 
     if reviewed and all(
         e.mode == "partial" and e.reason.startswith("分组审查调用失败") for e in reviewed
@@ -700,6 +663,64 @@ def review_target(target: ReviewTarget, options: ReviewOptions) -> dict:
         {"file": e.path, "findings": e.findings} for e in reviewed if e.findings
     ]
     return result
+
+
+def review_file_groups(
+    groups: list[list[FileEntry]],
+    *,
+    api_key: str,
+    model: str,
+    base_url: str,
+    options: ReviewOptions | None = None,
+) -> list[FileEntry]:
+    """Run one bounded model call per group; failures mark the group's files unread.
+
+    Never raises: a failed group leaves its entries ``fully_read=False`` (which
+    forces ``needs_review`` deterministically) and records the error in each
+    entry's reason, so the coverage table in the comment carries the evidence.
+    Also the shared engine for audit mode — pass ``options`` for the language and
+    per-call budgets; when ``options`` is None the defaults apply.
+    """
+    opts = options or ReviewOptions(api_key=api_key, model=model, base_url=base_url)
+    language = opts.language
+    for group in groups:
+        try:
+            raw = _call_with_retry(
+                _group_prompt(group, language),
+                api_key=api_key, model=model, base_url=base_url,
+                max_tokens=opts.file_max_tokens,
+                retry_max_tokens=opts.file_retry_max_tokens,
+                system_prompt=FILES_SYSTEM_PROMPT.replace(
+                    "{language}", "Chinese (中文)" if language != "en" else "English"
+                ),
+            )
+            payload = _extract_group_payload(raw)
+            answered = {
+                str(item.get("file", "")).strip(): item
+                for item in (payload.get("files") or [])
+                if isinstance(item, dict)
+            }
+        except ReviewError as exc:
+            for entry in group:
+                entry.fully_read = False
+                if entry.mode == "full":
+                    entry.mode = "partial"
+                    entry.reason = f"分组审查调用失败：{exc}"
+            continue
+        for entry in group:
+            item = answered.get(entry.path)
+            if item is None:
+                entry.fully_read = False
+                if entry.mode == "full":
+                    entry.mode = "partial"
+                    entry.reason = "分组审查没有覆盖该文件"
+                continue
+            entry.findings = _normalise_findings(item)
+            if item.get("fully_read") is False and entry.mode == "full":
+                entry.mode = "partial"
+                entry.reason = "分组审查自报未完整读取"
+                entry.fully_read = False
+    return [e for group in groups for e in group]
 
 
 def _degraded(summary: str, truncated: bool, dropped: str,

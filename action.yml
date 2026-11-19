@@ -11,7 +11,9 @@ branding:
 
 inputs:
   mode:
-    description: "scan (open pre-reviewed update PRs) or review (review PR_NUMBER)"
+    description: >-
+      scan (open pre-reviewed update PRs), review (attach full-file review to
+      PR_NUMBER), or audit (repo-wide sweep → labelled issue, deduped)
     required: true
   github_token:
     description: "Token for branch/PR/label API calls; pass secrets.GITHUB_TOKEN"
@@ -48,6 +50,6 @@ runs:
         PR_BODY: ${{ github.event.pull_request.body }}
       run: |
         case "$UPDATEPILOT_MODE" in
-          scan|review) updatepilot "$UPDATEPILOT_MODE" ;;
-          *) echo "::error::mode 必须是 scan 或 review，收到: $UPDATEPILOT_MODE"; exit 1 ;;
+          scan|review|audit) updatepilot "$UPDATEPILOT_MODE" ;;
+          *) echo "::error::mode 必须是 scan / review / audit，收到: $UPDATEPILOT_MODE"; exit 1 ;;
         esac

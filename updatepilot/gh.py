@@ -37,11 +37,13 @@ class GitError(RuntimeError):
     """A git/gh subprocess failed; the message carries stderr."""
 
 
-def _run(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
+def _run(args: list[str], *, cwd: Path, check: bool = True,
+         input_text: str | None = None) -> subprocess.CompletedProcess:
     """argv-list only, ``shell=False`` explicitly — see the module docstring."""
     result = subprocess.run(
         args, cwd=cwd, capture_output=True, text=True,
         encoding="utf-8", errors="replace", shell=False, check=False,
+        input=input_text,
     )
     if check and result.returncode != 0:
         raise GitError(
@@ -110,3 +112,63 @@ def comment_on_pr(cwd: Path, number: int, body: str) -> None:
 def label_pr(cwd: Path, number: int, label: str, color: str) -> None:
     _run(["gh", "label", "create", label, "--color", color, "--force"], cwd=cwd, check=False)
     _run(["gh", "pr", "edit", str(number), "--add-label", label], cwd=cwd)
+
+
+def pr_head_sha(cwd: Path, number: int) -> str:
+    result = _run(
+        ["gh", "pr", "view", str(number), "--json", "headRefOid", "--jq", ".headRefOid"],
+        cwd=cwd,
+    )
+    return result.stdout.strip()
+
+
+def post_review(cwd: Path, number: int, body: str, inline: list[dict]) -> None:
+    """Post a COMMENT review with optional inline comments (one API call).
+
+    ``inline`` items are ``{path, line, body}``; the caller guarantees every
+    line is a changed line of the PR diff — GitHub rejects review comments on
+    unchanged lines with 422, so the filter lives with the diff parser.
+    Payload goes to gh via stdin (JSON), never through a shell.
+    """
+    import json
+
+    slug = repo_slug(cwd)
+    payload: dict = {"event": "COMMENT", "body": body}
+    if inline:
+        payload["commit_id"] = pr_head_sha(cwd, number)
+        payload["comments"] = [
+            {"path": c["path"], "line": int(c["line"]), "body": c["body"]} for c in inline
+        ]
+    _run(
+        ["gh", "api", f"repos/{slug}/pulls/{number}/reviews", "--input", "-"],
+        cwd=cwd, input_text=json.dumps(payload, ensure_ascii=False),
+    )
+
+
+def latest_audit_issue(cwd: Path, label: str) -> tuple[int, str] | None:
+    """The most recent closed-or-open issue carrying ``label``, or None."""
+    result = _run(
+        ["gh", "issue", "list", "--label", label, "--state", "all",
+         "--limit", "1", "--json", "number,body"],
+        cwd=cwd,
+    )
+    import json as _json
+
+    try:
+        items = _json.loads(result.stdout or "[]")
+    except ValueError:
+        return None
+    if not items:
+        return None
+    first = items[0]
+    return int(first["number"]), str(first.get("body") or "")
+
+
+def create_issue(cwd: Path, *, title: str, body: str, label: str, color: str) -> int:
+    _run(["gh", "label", "create", label, "--color", color, "--force"], cwd=cwd, check=False)
+    result = _run(["gh", "issue", "create", "--title", title, "--body", body,
+                   "--label", label], cwd=cwd)
+    for token in reversed(result.stdout.strip().split("/")):
+        if token.isdigit():
+            return int(token)
+    raise GitError(f"could not parse issue number from gh output: {result.stdout!r}")

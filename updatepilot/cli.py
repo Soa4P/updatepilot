@@ -16,14 +16,39 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from . import gh
+from .audit import (
+    AUDIT_LABEL,
+    MAX_AUDIT_CALLS,
+    audit_issue_title,
+    build_audit_issue,
+    collect_audit_files,
+    filter_new_findings,
+)
 from .bumper import BumpError, apply_edits
-from .config import BotConfig, load_config, resolve_api_key, resolve_base_url
+from .config import (
+    MAX_FILE_BYTES,
+    MAX_FILE_LINES,
+    BotConfig,
+    load_config,
+    resolve_api_key,
+    resolve_base_url,
+)
 from .gh import GitError
+from .inline import build_inline_comments
 from .planner import ScanReport, attach_release_notes, fetch_latest_versions, plan_scan
-from .review import ReviewOptions, ReviewTarget, review_target
+from .review import (
+    FileEntry,
+    ReviewOptions,
+    ReviewTarget,
+    plan_groups,
+    review_file_groups,
+    review_target,
+    truncate,
+)
 
 LABEL_COLORS = {
     "ai:safe": "0E8A16",
@@ -228,6 +253,7 @@ def _review(repo_root: Path) -> int:
         return 0
     diff, names = _pr_diff_and_files(repo_root, number)
     options = _review_options(config, api_key)
+    inline = []
     with tempfile.TemporaryDirectory() as temp:
         tree = _pr_tree(repo_root, number, Path(temp))
         review = review_target(
@@ -240,13 +266,71 @@ def _review(repo_root: Path) -> int:
             ),
             options,
         )
+        # 行级内联评论：location 是纯行号且落在变更行内才锚——其余留在汇总里。
+        inline = build_inline_comments(review.get("findings", []), diff)
+    body = render_verdict(review)
+    if inline:
+        _print(f"内联评论 {len(inline)} 条（其余留在汇总）。")
     try:
-        gh.comment_on_pr(repo_root, number, render_verdict(review))
+        gh.post_review(repo_root, number, body, [
+            {"path": c.path, "line": c.line, "body": c.body} for c in inline
+        ])
         label = verdict_label(review["verdict"])
         gh.label_pr(repo_root, number, label, LABEL_COLORS[label])
     except GitError as exc:
         _print(f"⚠ PR #{number} 评论/打标失败：{exc}")
-    _print(json.dumps({"verdict": review["verdict"], "degraded": review["degraded"]}))
+    _print(json.dumps({"verdict": review["verdict"], "degraded": review["degraded"],
+                       "inline": len(inline)}))
+    return 0
+
+
+def _audit(repo_root: Path) -> int:
+    """Repo-wide sweep (draft-only): bounded groups → labelled issue, deduped
+    against the previous audit issue by signature. Disposal stays human."""
+    config = load_config(repo_root)
+    api_key = resolve_api_key(config.review)
+    if not api_key:
+        _print(f"未配置 {config.review.api_key_env}；巡检需要模型调用，未执行。")
+        return 0
+    options = _review_options(config, api_key)
+    files = collect_audit_files(
+        repo_root,
+        critical_paths=tuple(config.review.critical_paths),
+        extra_skip=tuple(config.review.generated_prefixes),
+    )
+    entries: list[FileEntry] = []
+    capped = 0
+    for rel in files:
+        content, was_capped, _dropped = truncate(
+            (repo_root / rel).read_text(encoding="utf-8", errors="replace"),
+            max_bytes=MAX_FILE_BYTES, max_lines=MAX_FILE_LINES,
+        )
+        capped += was_capped
+        entries.append(FileEntry(
+            path=rel.as_posix(), mode="full", content=content,
+            hunks="", fully_read=True,
+        ))
+    groups, _leftovers = plan_groups(entries, max_calls=MAX_AUDIT_CALLS)
+    _print(f"巡检 {len(entries)} 个文件，分 {len(groups)} 组（预算 {MAX_AUDIT_CALLS}）。")
+    reviewed = review_file_groups(
+        groups, api_key=api_key, model=options.model, base_url=options.base_url,
+    )
+    findings = [{"file": e.path, "findings": e.findings} for e in reviewed if e.findings]
+    previous = gh.latest_audit_issue(repo_root, AUDIT_LABEL)
+    fresh = filter_new_findings(findings, previous[1] if previous else None)
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    body = build_audit_issue(
+        now, "本轮巡检未做整体裁决——发现列表即产出（草稿，处置归维护者）。",
+        None, fresh, previous_url=f"#{previous[0]}" if previous else None,
+        scanned=len(entries),
+    )
+    note = f"，另 {capped} 个文件仅读了部分内容" if capped else ""
+    _print(f"新发现 {sum(len(g['findings']) for g in fresh)} 条（去重后）{note}。")
+    number = gh.create_issue(
+        repo_root, title=audit_issue_title(now), body=body,
+        label=AUDIT_LABEL, color="FBCA04",
+    )
+    _print(f"巡检 issue #{number} 已创建。")
     return 0
 
 
@@ -258,7 +342,9 @@ def main(argv: list[str] | None = None) -> int:
         return _scan(repo_root)
     if command == "review":
         return _review(repo_root)
-    _print("用法：updatepilot scan | updatepilot review（review 需要 PR_NUMBER）")
+    if command == "audit":
+        return _audit(repo_root)
+    _print("用法：updatepilot scan | review（需 PR_NUMBER）| audit（仓库巡检）")
     return 2
 
 
