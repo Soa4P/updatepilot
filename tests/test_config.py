@@ -29,23 +29,42 @@ def test_unknown_keys_fail_loudly(tmp_path: Path) -> None:
         load_config(tmp_path)
 
 
-def test_unsupported_ecosystem_is_an_error_with_a_hint(tmp_path: Path) -> None:
+def test_unsupported_ecosystem_is_an_error(tmp_path: Path) -> None:
+    """A typo'd or unimplemented ecosystem must not look like "nothing to update"."""
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "updatepilot.yml").write_text(
-        "ecosystems:\n  cargo: {enabled: true}\n", encoding="utf-8"
+        "ecosystems:\n  composer: {enabled: true}\n", encoding="utf-8"
     )
-    with pytest.raises(ConfigError, match="路线图"):
+    with pytest.raises(ConfigError, match="不支持"):
         load_config(tmp_path)
+
+
+def test_cargo_is_a_supported_ecosystem_now(tmp_path: Path) -> None:
+    """cargo moved off the roadmap: it has a manifest reader and a registry.
+
+    Pinned because the failure modes are quiet — if ``SUPPORTED_ECOSYSTEMS`` ever
+    loses it, every adopter's ``ecosystems.cargo`` block becomes a config error, and
+    if the default manifest regressed, the scan would silently find no pins.
+    """
+    config = load_config(tmp_path)  # defaults only, no file at all
+    assert "cargo" in config.enabled_ecosystems
+    assert config.ecosystems["cargo"].manifests == ["Cargo.toml"]
+
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "updatepilot.yml").write_text(
+        "ecosystems:\n  cargo: {allow_major: true}\n", encoding="utf-8"
+    )
+    assert load_config(tmp_path).ecosystems["cargo"].allow_major is True
 
 
 def test_disable_an_ecosystem_with_false(tmp_path: Path) -> None:
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "updatepilot.yml").write_text(
-        "ecosystems:\n  pip: false\n  npm: false\n", encoding="utf-8"
+        "ecosystems:\n  pip: false\n  npm: false\n  cargo: false\n", encoding="utf-8"
     )
     config = load_config(tmp_path)
     assert config.ecosystems["pip"].enabled is False
-    assert config.enabled_ecosystems == ["github_actions"]
+    assert config.enabled_ecosystems == ["github_actions"]  # npm and cargo disabled above
 
 
 def test_api_key_is_read_from_the_env_var_name(tmp_path: Path, monkeypatch) -> None:

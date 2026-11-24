@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .blast import blast_radii
 from .config import BotConfig, EcosystemConfig
 from .manifests import PinnedDependency, read_manifests
 from .registries import RegistryError
@@ -31,6 +32,9 @@ class Update:
     pin: PinnedDependency
     latest: str
     level: str  # major | minor | patch | other
+    #: Files in the repo that mention this dependency (see ``blast.py``). Used for
+    #: ordering only; it is a proxy for impact, not a correctness input.
+    radius: int = 0
 
 
 @dataclass
@@ -117,8 +121,17 @@ def plan_scan(
                 continue
             per_updates.append(Update(pin=pin, latest=new.raw, level=level))
 
+    # Order by blast radius before anything is planned: the ceiling below keeps the
+    # first N, so this line decides which updates a capped run actually opens. See
+    # blast.py for why the measure is "files that mention it" and not a real graph.
+    radii = blast_radii(repo_root, {u.pin.name for u in per_updates})
+    for update in per_updates:
+        update.radius = radii.get(update.pin.name, 0)
+
     majors = [u for u in per_updates if u.level == "major"]
     routines = [u for u in per_updates if u.level in ("minor", "patch", "other")]
+    # Majors are isolated PRs, so each one is its own queue slot: widest first.
+    majors.sort(key=lambda u: (-u.radius, u.pin.name, u.pin.file, u.pin.line))
 
     for update in majors:
         planned.append(_single_pr(update, config))
@@ -132,7 +145,7 @@ def plan_scan(
         grouped = [u for u in routines if u.pin.ecosystem == eco_name]
         if not grouped:
             continue
-        grouped.sort(key=lambda u: (u.pin.name, u.pin.file, u.pin.line))
+        grouped.sort(key=lambda u: (-u.radius, u.pin.name, u.pin.file, u.pin.line))
         pr = PlannedPR(
             ecosystem=eco_name,
             branch="",
@@ -176,12 +189,25 @@ def _single_pr(update: Update, config: BotConfig) -> PlannedPR:
         "",
         f"文件：`{update.pin.file}` 第 {update.pin.line} 行",
         "",
+        f"影响面：仓库内 {update.radius} 个文件提到它（用于排定本轮顺序的代理指标）。",
+        "",
     ]
     if update.pin.ecosystem == "npm":
         # The bot edits the manifest, never the lockfile — say so, or a lockfile-
         # enforcing CI fails in a way that reads like the bot broke the build.
         pr.body_lines += [
             "合并前请运行 `npm install` 刷新 lockfile（本 PR 不改 lock 文件）。",
+            "",
+        ]
+    elif update.pin.ecosystem == "cargo":
+        # A Cargo.toml version is a *requirement*, not a resolution: raising it
+        # changes nothing until Cargo.lock is refreshed. `cargo update -p` is
+        # scoped, so it does not sweep unrelated crates into this PR.
+        pr.body_lines += [
+            (
+                f"合并前请运行 `cargo update -p {update.pin.name}` 刷新 `Cargo.lock`"
+                "（本 PR 只改清单，不动 lock 文件）。"
+            ),
             "",
         ]
     pr.body_lines += [
@@ -200,11 +226,19 @@ def _fill_group_pr(pr: PlannedPR, config: BotConfig) -> None:
         f"**{pr.ecosystem}** · minor/patch 分组 · {len(names)} 个包：",
         "",
     ]
-    pr.body_lines.extend(f"- `{u.pin.name}` `{u.pin.current}` → `{u.latest}`（{u.level}）" for u in pr.updates)
+    pr.body_lines.extend(
+        f"- `{u.pin.name}` `{u.pin.current}` → `{u.latest}`（{u.level}，影响面 {u.radius}）"
+        for u in pr.updates
+    )
     if pr.ecosystem == "npm":
         pr.body_lines += [
             "",
             "合并前请运行 `npm install` 刷新 lockfile（本 PR 不改 lock 文件）。",
+        ]
+    elif pr.ecosystem == "cargo":
+        pr.body_lines += [
+            "",
+            "合并前请运行 `cargo update` 刷新 `Cargo.lock`（本 PR 只改清单，不动 lock 文件）。",
         ]
     pr.body_lines += [
         "",
@@ -223,7 +257,7 @@ def fetch_latest_versions(
     Registry failures are swallowed into None (the planner reports them as
     skipped) because one unreachable package must not stop the other thirty.
     """
-    from .registries import github_action_latest, npm_latest, pypi_latest
+    from .registries import crates_latest, github_action_latest, npm_latest, pypi_latest
 
     lookup: dict[str, str | None] = {}
     seen: set[str] = set()
@@ -239,6 +273,8 @@ def fetch_latest_versions(
                 lookup[key] = github_action_latest(pin.name, github_token)
             elif pin.ecosystem == "npm":
                 lookup[key] = npm_latest(pin.name)
+            elif pin.ecosystem == "cargo":
+                lookup[key] = crates_latest(pin.name)
             else:
                 lookup[key] = None
         except RegistryError as exc:
@@ -257,12 +293,18 @@ def attach_release_notes(
 
     Sources stay inside the already-allowed egress set: actions resolve their
     own ``owner/repo``; npm packages resolve a GitHub-hosted ``repository`` from
-    the registry record (anything else gets no notes, not a new outbound host).
-    pip has no reliable package→repo mapping in v1 — its PR body points at the
-    PyPI release page instead. Notes are cosmetic: a failure yields no notes,
-    never a failed scan.
+    Sources stay inside the already-allowed egress set: actions resolve their
+    own ``owner/repo``; npm and cargo packages resolve a GitHub-hosted
+    ``repository`` from the registry record (anything else gets no notes, not a
+    new outbound host). pip has no reliable package→repo mapping in v1 — its PR
+    body points at the PyPI release page instead. Notes are cosmetic: a failure
+    yields no notes, never a failed scan.
     """
-    from .registries import github_latest_release_notes, npm_repository_slug
+    from .registries import (
+        crates_repository_slug,
+        github_latest_release_notes,
+        npm_repository_slug,
+    )
 
     for pr in report.planned:
         for update in pr.updates:
@@ -272,6 +314,11 @@ def attach_release_notes(
             elif update.pin.ecosystem == "npm":
                 try:
                     slug = npm_repository_slug(update.pin.name)
+                except RegistryError:
+                    slug = None
+            elif update.pin.ecosystem == "cargo":
+                try:
+                    slug = crates_repository_slug(update.pin.name)
                 except RegistryError:
                     slug = None
             notes = None
@@ -296,4 +343,9 @@ def attach_release_notes(
                 pr.body_lines += [
                     "",
                     f"- `{update.pin.name}`：仓库未托管在 GitHub 或未声明 repository，未附 release notes。合并前请运行 `npm install` 刷新 lockfile（本 PR 不改 lock 文件）。",
+                ]
+            elif update.pin.ecosystem == "cargo":
+                pr.body_lines += [
+                    "",
+                    f"- [`{update.pin.name}`](https://crates.io/crates/{update.pin.name}/{update.latest})（仓库未托管在 GitHub 或未声明 repository，未附 release notes）",
                 ]

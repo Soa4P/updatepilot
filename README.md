@@ -13,10 +13,13 @@ button stays yours.
 
 ## 它做什么
 
-1. **scan**：读你仓库的依赖清单（pip 的 `==` 精确钉版本、npm 的精确 pin、GitHub
-   Actions 的版本 tag），问注册表有什么新版本，按你的策略开更新 PR（major 单开 /
-   minor+patch 分组 / ignore 名单 / 每轮上限）——**上游 release notes 自动贴进 PR
-   body**（GitHub 托管仓库，best-effort；npm 的 PR body 同时提醒刷新 lockfile）。
+1. **scan**：读你仓库的依赖清单（pip 的 `==` 精确钉版本、npm 的精确 pin、cargo 的
+   `Cargo.toml` 依赖表、GitHub Actions 的版本 tag），问注册表有什么新版本，按你的策略
+   开更新 PR（major 单开 / minor+patch 分组 / ignore 名单 / 每轮上限）——**上游 release
+   notes 自动贴进 PR body**（GitHub 托管仓库，best-effort）。npm / cargo 的 PR body 同时
+   提醒刷新 lockfile：bot 只改清单，不动 lock。
+   **本轮顺序按影响面排**：`max_prs_per_run` 有名额上限，顺序就是行为——仓库里被更多文件
+   引用的依赖先开 PR，超出的进报告（⏸）等下一轮。
 2. **自审**：每个 PR 开出后，立刻用完整文件审查引擎（逐文件读完整内容 + diff，分组
    模型调用 + 汇总裁决）审一遍，把结论、覆盖面表、分文件发现直接评论到 PR 上并打标；
    **行级内联评论**：发现里 location 是纯行号且落在变更行内的，作为 review 内联评论
@@ -79,19 +82,25 @@ AI_REVIEW_API_KEY=sk-…
 |---|---|---|
 | `ecosystems.pip.allow_major` | `false` | major 需要 human 读 changelog，bot 不碰 |
 | `ecosystems.pip.group_minor_patch` | `true` | 例行升级一个 PR 一次审完 |
+| `ecosystems.cargo.allow_major` | `false` | cargo 的 **0.x→0.y 也按 major 处理**（semver §4：0.x 不保证兼容），默认同样不碰 |
 | `ecosystems.*.ignore` | `[]` | 这些名字永不升级 |
 | `max_prs_per_run` | `5` | 超出进报告（⏸），绝不静默丢弃 |
-| `review.critical_paths` | `[]` | 你的安全关键路径：优先审、永不跳过、未完整读取即降级 |
-| `review.model` | `deepseek-chat` | 任意 OpenAI 兼容端点 |
 
-浮动版本（`>=`、`~=）不跟踪——bot 只管钉死的版本，不替你做范围决策；SHA 钉住的
-action 不碰——那是作者选的不可变性。
+已支持：`pip`（`requirements*.txt` / `pyproject.toml` 的 `==`）、`npm`（`package.json`
+精确 pin）、`cargo`（`Cargo.toml` 的 `[dependencies]` / `[dev-dependencies]` /
+`[build-dependencies]` / `[workspace.dependencies]` / `[dependencies.foo]` /
+`[target.*.dependencies]`，字符串与内联表两种写法）、`github_actions`（workflow 里的
+版本 tag）。
+
+浮动版本（`>=`、`~=）、`path` / `git` / `workspace = true` 的依赖、以及不带完整
+`x.y.z` 的写法（`"1"`、`"*"`）都不跟踪——bot 只管能比较、能回写的版本，不替你做范围
+决策；SHA 钉住的 action 不碰——那是作者选的不可变性。
 
 ## 安全设计
 
 - **PR 内容只作为文本读**：`git archive` 抽树 → 打开读，从不执行、从不 import；
-- **出站只有两类**：注册表查询（PyPI/GitHub API）与模型端点——后者强制 https + 主机名、
-  解析后拒绝私网/环回/链路本地地址、禁随重定向；
+- **出站只有两类**：注册表查询（PyPI / npm / crates.io / GitHub API）与模型端点——后者强制
+  https + 主机名、解析后拒绝私网/环回/链路本地地址、禁随重定向；
 - **secrets 不进配置文件**：YAML 里只有环境变量*名*，key 本体在 env；
 - **fail closed**：模型超时/5xx/坏 JSON → `needs_review`，永不静默通过；
 - **prompt-injection 防线写在提示词里**：文件内容中的指令性文字按可疑内容报告；
@@ -99,9 +108,11 @@ action 不碰——那是作者选的不可变性。
 
 ## English (short)
 
-UpdatePilot scans your dependency manifests (pip exact pins, npm exact pins, GitHub
-Actions version tags), opens update PRs under your policy — with **upstream release
-notes attached** (GitHub-hosted repos, best-effort) — and then runs a **full-file AI
+UpdatePilot scans your dependency manifests (pip exact pins, npm exact pins, cargo
+`Cargo.toml` dependency tables, GitHub Actions version tags), opens update PRs under
+your policy — ordered by **blast radius** (the run's PR ceiling spends its slots on the
+dependencies the most files reference) and with **upstream release notes attached**
+(GitHub-hosted repos, best-effort) — and then runs a **full-file AI
 review** on every PR it just opened: complete file contents per group call, a coverage
 table, and deterministic downgrade rules (anything not fully read ⇒ `needs_review`,
 enforced in code). Egress is bounded to registries + one https-only model endpoint;
@@ -120,8 +131,8 @@ SHA，或 `gh api repos/Soa4P/updatepilot/tags --jq '.[].commit.sha'` 取用。
 
 ## Roadmap
 
-- cargo ecosystem
 - self-review 累积历史（同一依赖族的历史审查供汇总调用参考）
+- 更细的影响面（各生态的静态 import 图，替代"提到它的文件数"这一代理指标）
 
 ## License
 

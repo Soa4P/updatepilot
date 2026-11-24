@@ -27,6 +27,10 @@ _PYPI = "https://pypi.org/pypi/{name}/json"
 _GH_TAGS = "https://api.github.com/repos/{owner}/{repo}/tags"
 _GH_RELEASE = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
 _NPM = "https://registry.npmjs.org/{name}/latest"
+#: crates.io's documented API. It requires a descriptive User-Agent (we send one)
+#: and answers both the version and the repository URL, so cargo needs no second
+#: egress host for changelog lookup.
+_CRATES = "https://crates.io/api/v1/crates/{name}"
 
 
 class RegistryError(RuntimeError):
@@ -149,6 +153,45 @@ def npm_latest(name: str) -> str | None:
         return None
     version = str(body.get("version") or "").strip()
     return version or None
+
+
+def crates_latest(name: str) -> str | None:
+    """Latest stable version of one crate, or None.
+
+    ``max_stable_version`` already excludes pre-releases; ``max_version`` is the
+    fallback for crates that only ever published a pre-release (in which case the
+    version classifies as one and the planner drops it — the same policy pip and
+    npm already get). A yanked latest shows up as ``null``, which we treat as "no
+    answer" rather than guessing the previous release.
+    """
+    body = _get_json(_CRATES.format(name=urllib.parse.quote(name)))
+    if not isinstance(body, dict):
+        return None
+    crate = body.get("crate")
+    if not isinstance(crate, dict):
+        return None
+    version = str(crate.get("max_stable_version") or crate.get("max_version") or "").strip()
+    return version or None
+
+
+def crates_repository_slug(name: str) -> str | None:
+    """``owner/repo`` from a crate's ``repository`` field, GitHub-hosted only.
+
+    Same rule as npm: the changelog fetch goes to api.github.com, an
+    already-allowed host, so a crate whose repository lives anywhere else gets no
+    notes instead of widening the egress set.
+    """
+    body = _get_json(_CRATES.format(name=urllib.parse.quote(name)))
+    if not isinstance(body, dict):
+        return None
+    crate = body.get("crate")
+    if not isinstance(crate, dict):
+        return None
+    repo = crate.get("repository")
+    if not isinstance(repo, str):
+        return None
+    match = re.search(r"github\.com[/:]([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$", repo)
+    return match.group(1) if match else None
 
 
 def npm_repository_slug(name: str) -> str | None:
