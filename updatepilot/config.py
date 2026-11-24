@@ -204,7 +204,13 @@ def load_config(repo_root: Path) -> BotConfig:
     """
     path = repo_root / CONFIG_PATH
     if not path.is_file():
-        return default_config()
+        # The env override applies here too. It used to be applied only on the
+        # config-file path, so ``UPDATEPILOT_DRY_RUN=1`` was silently ignored in the
+        # *default* case — the common one for a first-time adopter — and a "dry run"
+        # opened real PRs (measured: two of them, on this project's own repository).
+        config = default_config()
+        config.dry_run = _dry_run_from_env()
+        return config
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
@@ -242,8 +248,16 @@ def load_config(repo_root: Path) -> BotConfig:
         review=review,
         max_prs_per_run=max_prs,
         branch_prefix=str(raw.get("branch_prefix", "updatepilot")),
-        dry_run=bool(os.environ.get("UPDATEPILOT_DRY_RUN", "")),
+        dry_run=_dry_run_from_env(),
     )
+
+
+def _dry_run_from_env() -> bool:
+    """``UPDATEPILOT_DRY_RUN`` is a safety switch, so it must mean the same thing on
+    every code path. Anything that is not clearly "off" counts as on: a typo like
+    ``UPDATEPILOT_DRY_RUN=yes`` should suppress PR creation, not enable it."""
+    raw = os.environ.get("UPDATEPILOT_DRY_RUN", "").strip().lower()
+    return raw not in ("", "0", "false", "no", "off")
 
 
 def resolve_api_key(review: ReviewConfig) -> str:
