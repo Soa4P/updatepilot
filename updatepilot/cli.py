@@ -186,7 +186,10 @@ def _scan(repo_root: Path) -> int:
     _render_report(report)
     api_key = resolve_api_key(config.review)
     options = _review_options(config, api_key)
-    base_branch = gh.default_branch(repo_root)
+    # Dry-run must not need the network: `default_branch` fetches, and a scan that
+    # cannot reach GitHub should still show the plan it *would* open (measured — it
+    # printed "git fetch origin… failed" and then "0 PRs", which reads like success).
+    base_branch = "" if config.dry_run else gh.default_branch(repo_root)
     opened: list[tuple[int, str]] = []
 
     for planned in report.planned:

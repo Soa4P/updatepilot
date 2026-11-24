@@ -94,9 +94,6 @@ def pypi_latest(name: str) -> str | None:
     return version or None
 
 
-_GITREF = re.compile(r"refs/tags/")
-
-
 def github_action_latest(action: str, token: str | None) -> str | None:
     """Highest ``vN`` tag for one action repo, or None.
 
@@ -136,11 +133,20 @@ def github_action_latest(action: str, token: str | None) -> str | None:
     for item in body:
         if not isinstance(item, dict):
             continue
-        ref = str(item.get("ref") or "")
-        match = re.fullmatch(r"refs/tags/v?(\d+)", ref)
+        # ``GET /repos/{o}/{r}/tags`` answers ``{"name": "v7.0.1", "commit": …}`` — no
+        # ``ref`` field at all (that shape belongs to ``/git/refs/tags``). Reading
+        # ``ref`` here meant this function returned None for *every* real action, so
+        # action bumps silently never happened; the tests passed because their mock
+        # used the wrong shape too. Both spellings are accepted now.
+        # ``fullmatch`` with an anchored number, not ``search``: tags like
+        # ``v3.2.2-node20`` end in a number that is a *node runtime* version, and a
+        # trailing ``search`` reads it as major 20 — which is how a bogus
+        # "upload-artifact v7 → v20" PR got opened. A release tag is a bare version.
+        tag = str(item.get("name") or item.get("ref") or "")
+        match = re.fullmatch(r"(?:refs/tags/)?v?(\d+(?:\.\d+)*)", tag)
         if not match:
             continue
-        major = int(match.group(1))
+        major = int(match.group(1).split(".", 1)[0])
         if major > best_major:
             best_major, best_ref = major, f"v{major}"
     return best_ref
