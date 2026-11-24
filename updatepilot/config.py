@@ -16,11 +16,12 @@ import yaml
 
 CONFIG_PATH = ".github/updatepilot.yml"
 
-#: ecosystems shipped in v1. npm and cargo are on the roadmap; unknown keys are
-#: reported as errors rather than silently ignored (a typo'd ecosystem name must
-#: not look like "nothing to update").
-SUPPORTED_ECOSYSTEMS = ("pip", "npm", "github_actions")
-ROADMAP_ECOSYSTEMS = ("cargo",)
+#: Ecosystems with a manifest reader and a registry. Unknown keys are reported as
+#: errors rather than silently ignored (a typo'd ecosystem name must not look like
+#: "nothing to update").
+SUPPORTED_ECOSYSTEMS = ("pip", "npm", "github_actions", "cargo")
+#: Ecosystems named in docs/roadmap but not implemented yet.
+ROADMAP_ECOSYSTEMS: tuple[str, ...] = ()
 
 #: Per-run ceilings. The scan job holds the user's API key; these bounds exist so a
 #: pathological manifest cannot turn into 500 registry calls or an open wallet.
@@ -109,6 +110,18 @@ def default_config() -> BotConfig:
                 allow_major=True,  # action majors are runtime updates; skipping them misses security fixes
                 group_minor_patch=False,
                 manifests=[".github/workflows"],
+            ),
+            # Cargo's `version = "1.2.3"` is a *caret* requirement: it allows
+            # 1.2.z and 1.x upgrades. Only fully exact pins ("=1.2.3") are
+            # truly immutable, but the caret form is what real Cargo.toml files
+            # carry, and treating it as "already floating" would make the
+            # ecosystem useless. Policy: track the caret minimum as the pin and
+            # let the reviewer see the semver level (0.x minor counts as major).
+            # `Cargo.lock` is the repo's own CI duty — the bot notes it in the
+            # PR body instead of touching the lock.
+            "cargo": EcosystemConfig(
+                manifests=["Cargo.toml"],
+                group_minor_patch=True,
             ),
         },
         review=ReviewConfig(),

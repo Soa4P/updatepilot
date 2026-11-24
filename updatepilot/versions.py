@@ -1,6 +1,6 @@
 """Version comparison and change classification.
 
-Three version worlds live here:
+Four version worlds live here:
 
 * **PEP 440** (pip): parsed with ``packaging.version`` — the ecosystem standard.
 * **GitHub action refs** (``v4``, ``v7``): plain major integers. Action tags are
@@ -11,6 +11,12 @@ Three version worlds live here:
   numeric before alphanumeric); build metadata is ignored for precedence, per
   semver. Ranges (``^1.0.0``) are never parsed — floating entries are not the
   bot's business.
+* **cargo semver** (``1.2.3``, ``0.8.5``): exactly the same grammar as npm, with
+  one policy difference that matters — **under ``0.x`` a minor bump is a breaking
+  change** (semver §4: "major version zero … anything MAY change at any time").
+  Cargo's own caret rule agrees: ``^0.8`` allows only ``0.8.z``. Classifying
+  ``0.8 → 0.9`` as "minor" would let it into a routine grouped PR and skip the
+  changelog read that majors get, so ``change_level`` reports ``major`` for it.
 
 Classification (major/minor/patch/other) drives the policy engine: majors are
 isolated PRs by default, minor+patch group together.
@@ -38,10 +44,13 @@ class VersionInfo:
     """A version we can compare and classify, whatever its ecosystem."""
 
     raw: str
-    kind: str  # pep440 | action | npm
+    kind: str  # pep440 | action | npm | cargo
     pep: Version | None = None
     action_major: int | None = None
     npm: tuple | None = None  # (major, minor, patch, prerelease_tuple | ())
+    #: cargo reuses the semver tuple; the kind stays distinct so classification
+    #: can apply cargo's 0.x rule without a second parser.
+    _SEMVER_KINDS = ("npm", "cargo")
 
     @classmethod
     def parse(cls, raw: str, kind: str = "pep440") -> VersionInfo | None:
@@ -51,13 +60,13 @@ class VersionInfo:
             if not match:
                 return None
             return cls(raw=raw, kind="action", action_major=int(match.group(1)))
-        if kind == "npm":
+        if kind in ("npm", "cargo"):
             match = _NPM_SEMVER.match(raw)
             if not match:
                 return None
             prerelease = tuple(match.group(4).split(".")) if match.group(4) else ()
             return cls(
-                raw=raw, kind="npm",
+                raw=raw, kind=kind,
                 npm=(int(match.group(1)), int(match.group(2)), int(match.group(3)), prerelease),
             )
         try:
@@ -70,7 +79,7 @@ class VersionInfo:
             raise ValueError(f"cannot compare {self.kind} with {other.kind}")
         if self.kind == "action":
             return (self.action_major or 0) < (other.action_major or 0)
-        if self.kind == "npm":
+        if self.kind in self._SEMVER_KINDS:
             return self._npm_precedence() < other._npm_precedence()
         assert self.pep is not None and other.pep is not None
         return self.pep < other.pep
@@ -82,7 +91,7 @@ class VersionInfo:
             return False
         if self.kind == "action":
             return self.action_major == other.action_major
-        if self.kind == "npm":
+        if self.kind in self._SEMVER_KINDS:
             return self._npm_precedence() == other._npm_precedence()
         return self.pep == other.pep
 
@@ -120,9 +129,14 @@ class VersionInfo:
             if self.action_major < other.action_major:
                 return "other"  # downgrade; the planner refuses these
             return "patch"  # same major, tag bump = runtime update
-        if self.kind == "npm":
+        if self.kind in self._SEMVER_KINDS:
             assert self.npm is not None and other.npm is not None
             if self.npm[0] > other.npm[0]:
+                return "major"
+            if self.kind == "cargo" and other.npm[0] == 0 and self.npm[1] > other.npm[1]:
+                # 0.x is pre-stability: cargo's caret rule (^0.8 → only 0.8.z) and
+                # semver §4 both say a 0.x minor move can break. Route it through
+                # the major path so it needs an explicit allow_major + changelog.
                 return "major"
             if self.npm[0] == other.npm[0] and self.npm[1] > other.npm[1]:
                 return "minor"
@@ -145,7 +159,7 @@ class VersionInfo:
     def is_prerelease(self) -> bool:
         if self.kind == "action":
             return False
-        if self.kind == "npm":
+        if self.kind in self._SEMVER_KINDS:
             assert self.npm is not None
             return bool(self.npm[3])
         assert self.pep is not None
@@ -167,7 +181,7 @@ def classify_update(current: str, latest: str, kind: str = "pep440") -> tuple[st
             return None
         if not (new.pep > cur.pep):
             return None
-    elif kind == "npm":
+    elif kind in ("npm", "cargo"):
         if new.is_prerelease():
             return None
         if not (new._npm_precedence() > cur._npm_precedence()):

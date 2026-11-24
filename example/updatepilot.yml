@@ -31,6 +31,19 @@ ecosystems:
     allow_major: false
     group_minor_patch: true
 
+  # cargo：Cargo.toml 依赖表（[dependencies]、[dev-dependencies]、
+  # [build-dependencies]、[workspace.dependencies]、[dependencies.foo]、target 专属表），
+  # 字符串与内联表两种写法都认。path/git/workspace = true 以及没有完整 x.y.z 的写法不跟踪。
+  # 注意：0.x → 0.y 按 major 处理（semver：0.x 不保证兼容），默认同样不碰。
+  # 本 PR 只改清单；Cargo.toml 的版本是"要求"，合并前需 cargo update 刷新 Cargo.lock。
+  cargo:
+    enabled: true
+    manifests:
+      - Cargo.toml
+    ignore: []
+    allow_major: false
+    group_minor_patch: true
+
   # GitHub Actions：workflow 里的 uses: owner/action@ref（只跟版本 tag，SHA 钉住的不动）。
   github_actions:
     enabled: true
