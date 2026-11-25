@@ -99,9 +99,23 @@ def plan_scan(
             if pin.name in {i.lower() for i in eco.ignore}:
                 skipped.append(f"{eco_name}: {pin.name} 在 ignore 名单")
                 continue
-            latest = lookup.get(f"{eco_name}:{pin.name}")
+            key = f"{eco_name}:{pin.name}"
+            latest = lookup.get(key)
             if latest is None:
-                skipped.append(f"{eco_name}: {pin.name} 没有可用的新版本信息")
+                # Three states used to collapse into one line, and the collapsed one read
+                # like "you are up to date":
+                #   * the registry answered and has no such package (404)  -> 查不到
+                #   * the lookup failed (network, rate limit, bad JSON)     -> 查询失败
+                #   * it answered with nothing newer                        -> 已是最新 (no line)
+                # "Cannot check" must be an error, not a skip, or a scan that can see
+                # nothing reports success.
+                reason = lookup.get(f"{key}:error")
+                if reason:
+                    errors.append(f"{eco_name}: {pin.name} 查询失败（{reason}）")
+                else:
+                    skipped.append(
+                        f"{eco_name}: {pin.name} 注册表里没有这个包的最新版本信息（可能未发布到该注册表）"
+                    )
                 continue
             try:
                 result = classify_update(pin.current, latest, pin.kind)
