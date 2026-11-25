@@ -50,6 +50,7 @@ from .review import (
     review_target,
     truncate,
 )
+from .treeguard import EXTRACT_TIMEOUT_SECONDS, TreeTooLargeError, assert_tree_within_limits
 
 LABEL_COLORS = {
     "ai:safe": "0E8A16",
@@ -77,9 +78,11 @@ def _pr_tree(cwd: Path, number: int, temp_dir: Path) -> Path:
         subprocess.run(
             ["git", "archive", "FETCH_HEAD"], cwd=cwd, check=True, stdout=handle,
         )
+    assert_tree_within_limits(archive)
     subprocess.run(
         ["tar", "-xf", str(archive), "-C", str(tree)],
         cwd=cwd, capture_output=True, text=True, shell=False, check=True,
+        timeout=EXTRACT_TIMEOUT_SECONDS,
     )
     archive.unlink()
     return tree
@@ -171,9 +174,11 @@ def _branch_tree(cwd: Path, branch: str, temp_dir: Path) -> Path:
         subprocess.run(
             ["git", "archive", gh.validate_branch(branch)], cwd=cwd, check=True, stdout=handle,
         )
+    assert_tree_within_limits(archive)
     subprocess.run(
         ["tar", "-xf", str(archive), "-C", str(tree)],
         cwd=cwd, capture_output=True, text=True, shell=False, check=True,
+        timeout=EXTRACT_TIMEOUT_SECONDS,
     )
     archive.unlink()
     return tree
@@ -214,19 +219,31 @@ def _scan(repo_root: Path) -> int:
             # this PR's commit and the review, nothing may silently drift — and
             # the next loop iteration's checkout_base would reset the tree.
             with tempfile.TemporaryDirectory() as temp:
-                tree = _branch_tree(repo_root, planned.branch, Path(temp))
-                review = review_target(
-                    ReviewTarget(
-                        diff=diff,
-                        changed_files=sorted(planned.edits),
-                        tree_root=tree,
-                        title=planned.title,
-                        body="\n".join(planned.body_lines),
-                    ),
-                    options,
-                )
-            verdict = review["verdict"]
-            comment = render_verdict(review)
+                try:
+                    tree = _branch_tree(repo_root, planned.branch, Path(temp))
+                except TreeTooLargeError as exc:
+                    # A tree we refuse to unpack is still a PR we opened: say so on the
+                    # PR rather than leaving it silently unreviewed.
+                    _print(f"⚠ {planned.title}: 审查树超出限额，已跳过审查（{exc}）")
+                    tree = None
+                if tree is not None:
+                    review = review_target(
+                        ReviewTarget(
+                            diff=diff,
+                            changed_files=sorted(planned.edits),
+                            tree_root=tree,
+                            title=planned.title,
+                            body="\n".join(planned.body_lines),
+                        ),
+                        options,
+                    )
+                    verdict = review["verdict"]
+                    comment = render_verdict(review)
+                else:
+                    comment = (
+                        "本 PR 未经过 AI 审查：待审代码树超出审查限额（文件数/单文件/总量）。"
+                        "请人工审查，或拆分本 PR。"
+                    )
         else:
             comment = "未配置审查模型 key；本 PR 未经过 AI 审查，请人工审查。"
         try:
@@ -256,7 +273,11 @@ def _review(repo_root: Path) -> int:
     options = _review_options(config, api_key)
     inline = []
     with tempfile.TemporaryDirectory() as temp:
-        tree = _pr_tree(repo_root, number, Path(temp))
+        try:
+            tree = _pr_tree(repo_root, number, Path(temp))
+        except TreeTooLargeError as exc:
+            _print(f"审查树超出限额，拒绝解包：{exc}")
+            return 1
         review = review_target(
             ReviewTarget(
                 diff=diff,
