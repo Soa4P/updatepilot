@@ -136,6 +136,65 @@ def test_capped_file_forces_needs_review_even_when_the_model_says_safe() -> None
     assert "自动降级" in result["summary"]
 
 
+def test_a_skip_only_pr_cannot_be_labelled_safe() -> None:
+    """`ai:safe` claims what was read, so zero read files cannot earn it (audit S-UP-03).
+
+    A lockfile-only PR has every file classified generated, so the model is asked about an
+    empty payload and cheerfully answers "safe". The label then tells a maintainer no human
+    is needed while nothing was actually inspected.
+    """
+    synthesis = _verdict({"verdict": "safe", "risk": "low", "summary": "looks fine"})
+    skipped = [
+        FileEntry(path="package-lock.json", mode="skip", reason="lockfile/generated"),
+        FileEntry(path="docs/logo.png", mode="skip", reason="binary/generated suffix"),
+    ]
+    with mock.patch(
+        "updatepilot.review.call_model", return_value=synthesis,
+    ), mock.patch(
+        "updatepilot.review.collect_file_entries", return_value=skipped,
+    ), mock.patch(
+        "updatepilot.review.plan_groups", return_value=([], []),
+    ):
+        result = review_target(
+            ReviewTarget(
+                diff="+lockfile", changed_files=["package-lock.json", "docs/logo.png"], title="t",
+            ),
+            _options(),
+        )
+    assert result["verdict"] == "needs_review"
+    assert "没有任何文件内容被读取" in result["summary"]
+
+
+def test_one_read_file_is_enough_to_keep_the_safe_label() -> None:
+    """The rule is "must have read something", not "must have read everything".
+
+    Without this, the previous fix could be widened by accident into downgrading every
+    review that legitimately has a generated file alongside a real one.
+    """
+    synthesis = _verdict({"verdict": "safe", "risk": "low", "summary": "looks fine"})
+    entries = [
+        FileEntry(path="package-lock.json", mode="skip", reason="lockfile/generated"),
+        FileEntry(path="src/app.py", mode="full", content="x = 1", fully_read=True),
+    ]
+    with mock.patch(
+        "updatepilot.review.call_model", return_value=synthesis,
+    ), mock.patch(
+        "updatepilot.review.collect_file_entries", return_value=entries,
+    ), mock.patch(
+        "updatepilot.review.plan_groups", return_value=([[entries[1]]], []),
+    ), mock.patch(
+        "updatepilot.review.review_file_groups", return_value=[entries[1]],
+    ):
+        result = review_target(
+            ReviewTarget(
+                diff="+x", changed_files=["package-lock.json", "src/app.py"], title="t",
+            ),
+            _options(),
+        )
+    assert result["verdict"] == "safe"
+    assert "自动降级" not in result["summary"]
+
+
 def test_group_failure_degrades_without_spending_synthesis() -> None:
     with mock.patch(
         "updatepilot.review.call_model", side_effect=ReviewError("HTTP 500")
