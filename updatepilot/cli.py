@@ -144,6 +144,13 @@ def _render_report(report: ScanReport) -> None:
         _print(f"⏭ {line}")
     for line in report.errors:
         _print(f"✗ {line}")
+    if report.errors:
+        # The summary line is what a human reads when they skim a scheduled run. Without
+        # this, "0 PRs" from a rate-limited run is indistinguishable from "everything is
+        # current" — the failure mode that made an action bump silently never happen.
+        _print(
+            f"⚠ {len(report.errors)} 个依赖**没查成**（不是已最新）；这些坐标本轮没有结论，详见上面的 ✗ 行。"
+        )
 
 
 def _review_options(config: BotConfig, api_key: str) -> ReviewOptions:
