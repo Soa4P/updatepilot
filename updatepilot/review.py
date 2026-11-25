@@ -564,6 +564,15 @@ def _forced_unsafe(entries: list[FileEntry], truncated: bool, *, language: str =
     reasons: list[str] = []
     if truncated:
         reasons.append("diff 已截断" if zh else "diff truncated")
+    # Nothing was read at all: every changed file was classified generated/binary, or the
+    # PR changed no files. The model can still answer "safe" — it was asked about an empty
+    # payload — and a lockfile-only PR would then carry `ai:safe` with zero file content
+    # behind it. `ai:safe` is a claim about what was read, so it needs at least one read
+    # file to exist. Downgrade rather than refuse: the PR is still opened and reviewed,
+    # it just does not get the label that says "no human needed".
+    if not any(e.fully_read and e.mode in ("full", "diff_only") for e in entries):
+        reasons.append("没有任何文件内容被读取（全部按生成物/二进制跳过）" if zh
+                       else "no file content was read (everything skipped as generated/binary)")
     for entry in entries:
         if entry.mode == "skip":
             if entry.critical:

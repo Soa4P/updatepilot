@@ -203,6 +203,7 @@ def _scan(repo_root: Path) -> int:
     # printed "git fetch origin… failed" and then "0 PRs", which reads like success).
     base_branch = "" if config.dry_run else gh.default_branch(repo_root)
     opened: list[tuple[int, str]] = []
+    publish_failures: list[str] = []
 
     for planned in report.planned:
         if config.dry_run:
@@ -261,9 +262,18 @@ def _scan(repo_root: Path) -> int:
             gh.label_pr(repo_root, number, verdict_label(verdict),
                         LABEL_COLORS[verdict_label(verdict)])
         except GitError as exc:
+            # A warning here used to be the whole handling: the job stayed green, the PR
+            # said "pre-reviewed" in its body, and no comment or label existed to check
+            # (audit S-UP-04). The publish half is the deliverable, so failing it fails
+            # the run — after the remaining PRs have been given their chance.
             _print(f"⚠ PR #{number} 评论/打标失败：{exc}")
+            publish_failures.append(f"#{number}: {exc}")
         opened.append((number, verdict))
     _print(f"完成：{len(opened)} 个 PR 已开出并附审查。")
+    if publish_failures:
+        _print(f"✗ {len(publish_failures)} 个 PR 的审查结论没有发布成功（工作流按失败处理）："
+               + "；".join(publish_failures))
+        return 1
     return 0
 
 
@@ -314,9 +324,15 @@ def _review(repo_root: Path) -> int:
         label = verdict_label(review["verdict"])
         gh.label_pr(repo_root, number, label, LABEL_COLORS[label])
     except GitError as exc:
+        # Exit non-zero: the verdict JSON and the check run are what callers rely on, and
+        # a green job whose PR has no review comment is the failure this replaced
+        # (audit S-UP-04). Printing the JSON first keeps the evidence available.
+        _print(json.dumps({"verdict": review["verdict"], "degraded": review["degraded"],
+                           "inline": len(inline), "published": False}))
         _print(f"⚠ PR #{number} 评论/打标失败：{exc}")
+        return 1
     _print(json.dumps({"verdict": review["verdict"], "degraded": review["degraded"],
-                       "inline": len(inline)}))
+                       "inline": len(inline), "published": True}))
     return 0
 
 

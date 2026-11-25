@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "updatepilot"
-version = "1.4.0"
+version = "1.4.4"
 description = "Dependency update bot whose every PR arrives pre-reviewed by a full-file AI review."
 readme = "README.md"
 requires-python = ">=3.10"
