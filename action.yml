@@ -48,8 +48,27 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
+        # Only used for the guard below; never trusted for anything else.
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         case "$UPDATEPILOT_MODE" in
-          scan|review|audit) updatepilot "$UPDATEPILOT_MODE" ;;
+          scan|review|audit) ;;
           *) echo "::error::mode 必须是 scan / review / audit，收到: $UPDATEPILOT_MODE"; exit 1 ;;
         esac
+
+        # `pull_request_target` runs with secrets in scope, so *what runs* has to be the
+        # base commit's code and config. If the caller checked out the PR head instead,
+        # the PR author has written the program and its `.github/updatepilot.yml` — a
+        # config file this action would then trust (audit S-UP-05). Refuse loudly rather
+        # than review the PR with the PR's own code.
+        if [ -n "$PR_HEAD_SHA" ] && [ "$UPDATEPILOT_MODE" = "review" ]; then
+          head_now="$(git -C "$UPDATEPILOT_REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
+          if [ "$head_now" = "$PR_HEAD_SHA" ]; then
+            echo "::error::workspace HEAD is the PR head commit. In review mode check out the base ref:"
+            echo "::error::  uses: actions/checkout@<sha>"
+            echo "::error::  with: { ref: \${{ github.event.pull_request.base.sha }} }"
+            exit 1
+          fi
+        fi
+
+        updatepilot "$UPDATEPILOT_MODE"

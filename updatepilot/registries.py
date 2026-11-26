@@ -219,6 +219,40 @@ def npm_repository_slug(name: str) -> str | None:
     return match.group(1) if match else None
 
 
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_UNCLOSED_COMMENT = re.compile(r"<!--.*$", re.DOTALL)
+_HTML_TAG = re.compile(r"<\s*/?\s*[a-zA-Z][^>]*>")
+#: Zero-width and bidi-control characters, spelled with escapes rather than the literal
+#: code points: an invisible character in this file is a hazard for the next reader.
+_INVISIBLE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f]")
+_EXCESS_BLANK_LINES = re.compile(r"\n{3,}")
+
+
+def sanitize_release_notes(text: str, *, limit: int = 1200) -> str:
+    """Make upstream release notes safe to put in a PR body and a review prompt.
+
+    The text is written by whoever publishes the package — an arbitrary third party —
+    and it ends up in a PR this bot signs and in the reviewer's prompt (audit S-UP-06).
+    Two payloads matter and neither is visible when the PR is read on GitHub:
+
+    * HTML comments, which render as nothing but are still *in the body* — the classic
+      place to hide an instruction that only the model and a diff reader will see;
+    * inline HTML (``<img src=...>``, ``<a>``), which can phone home when previewed.
+
+    Zero-width and bidi controls go too: they make text read differently from its bytes,
+    which is exactly what a hostile changelog wants. What is left is plain Markdown, and
+    the caller labels it as unvetted upstream text.
+    """
+    if not text:
+        return ""
+    cleaned = _HTML_COMMENT.sub("", text)
+    cleaned = _UNCLOSED_COMMENT.sub("", cleaned)
+    cleaned = _HTML_TAG.sub("", cleaned)
+    cleaned = _INVISIBLE.sub("", cleaned)
+    cleaned = _EXCESS_BLANK_LINES.sub("\n\n", cleaned)
+    return cleaned.strip()[:limit]
+
+
 def github_latest_release_notes(slug: str, token: str | None) -> str | None:
     """Body of the latest GitHub release for ``owner/repo``, bounded and plain.
 
@@ -248,5 +282,5 @@ def github_latest_release_notes(slug: str, token: str | None) -> str | None:
         return None
     if not isinstance(body, dict):
         return None
-    text = str(body.get("body") or "").strip()
-    return text[:1200] or None
+    text = sanitize_release_notes(str(body.get("body") or ""))
+    return text or None
