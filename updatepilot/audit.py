@@ -56,10 +56,22 @@ def collect_audit_files(
     Ranking: security-critical paths first (the config's critical_paths), then
     everything else by path — stable so consecutive sweeps read the same order
     and the dedupe signature stays meaningful.
+
+    Only regular files **inside** the repository are listed. ``is_file()`` follows
+    symlinks, so a committed ``notes.py -> /home/ops/.ssh/id_rsa`` used to be read and
+    pasted into the model prompt — and from there into a public issue (audit S-UP-01).
+    The resolved path must stay under the repo root; a link is skipped, not read
+    through.
     """
+    root = repo_root.resolve()
     files: list[Path] = []
     for path in sorted(repo_root.rglob("*")):
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            if not path.resolve().is_relative_to(root):
+                continue
+        except OSError:
             continue
         rel = path.relative_to(repo_root)
         if _is_source(rel, extra_skip):

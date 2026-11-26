@@ -352,9 +352,18 @@ def _audit(repo_root: Path) -> int:
     )
     entries: list[FileEntry] = []
     capped = 0
+    root = repo_root.resolve()
     for rel in files:
+        # Re-check at read time: the listing may be older than this loop, and a link
+        # swapped in between must not be followed (audit S-UP-01). Cheap — one stat.
+        candidate = repo_root / rel
+        try:
+            if candidate.is_symlink() or not candidate.resolve().is_relative_to(root):
+                continue
+        except OSError:
+            continue
         content, was_capped, _dropped = truncate(
-            (repo_root / rel).read_text(encoding="utf-8", errors="replace"),
+            candidate.read_text(encoding="utf-8", errors="replace"),
             max_bytes=MAX_FILE_BYTES, max_lines=MAX_FILE_LINES,
         )
         capped += was_capped

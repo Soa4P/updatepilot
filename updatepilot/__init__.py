@@ -13,4 +13,4 @@ The bot never merges and never approves. It brings the proposal to your door wit
 its own homework already done; the merge button stays yours.
 """
 
-__version__ = "1.4.4"
+__version__ = "1.4.5"

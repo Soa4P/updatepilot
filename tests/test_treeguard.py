@@ -92,3 +92,39 @@ def test_extraction_gets_a_wall_clock_ceiling() -> None:
     assert source.count("timeout=EXTRACT_TIMEOUT_SECONDS") == 2, (
         "both tree builds (PR and branch) must carry the timeout"
     )
+
+
+def test_a_link_member_is_refused(tmp_path: Path) -> None:
+    """``git archive`` of a PR can carry a symlink; extraction would create it.
+
+    A link has no role in a tree that exists to be read as text, and following one is
+    how ``notes.py -> /home/ops/.ssh/id_rsa`` becomes model input (audit S-UP-01).
+    """
+    archive = tmp_path / "link.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("pkg/leak.py")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+    with pytest.raises(TreeTooLargeError, match="link"):
+        assert_tree_within_limits(archive)
+
+
+def test_collect_audit_files_skips_links_out_of_the_repository(tmp_path: Path) -> None:
+    """Audit mode walks the working tree, where ``is_file()`` follows links."""
+    from updatepilot.audit import collect_audit_files
+
+    secret = tmp_path / "outside-secret.txt"
+    secret.write_text("PRIVATE KEY", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "real.py").write_text("x = 1\n", encoding="utf-8")
+    link = repo / "leak.py"
+    try:
+        link.symlink_to(secret)
+    except OSError:  # pragma: no cover - Windows without developer mode
+        pytest.skip("cannot create symlinks in this environment")
+
+    files = [p.as_posix() for p in collect_audit_files(repo)]
+
+    assert files == ["real.py"], files
