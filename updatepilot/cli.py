@@ -405,8 +405,39 @@ def main(argv: list[str] | None = None) -> int:
         return _review(repo_root)
     if command == "audit":
         return _audit(repo_root)
-    _print("用法：updatepilot scan | review（需 PR_NUMBER）| audit（仓库巡检）")
+    if command == "quality":
+        return _quality(repo_root, argv[1:])
+    _print("用法：updatepilot scan | review（需 PR_NUMBER）| audit（仓库巡检）| "
+           "quality（审查质量度量）")
     return 2
+
+
+def _quality(repo_root: Path, args: list[str]) -> int:
+    """Measure the reviewer against the labelled corpus.
+
+    Without ``--with-model`` this runs the deterministic half only (a stubbed model that
+    always says safe), which is what CI gates on: it proves the downgrade rules hold, not
+    that the model is good. ``--with-model`` makes real calls and needs a key.
+    """
+    from .quality import run_quality
+
+    corpus = repo_root / "tests" / "corpus" / "review_quality.jsonl"
+    with_model = "--with-model" in args
+    for index, arg in enumerate(args):
+        if arg == "--corpus" and index + 1 < len(args):
+            corpus = Path(args[index + 1])
+    if not corpus.is_file():
+        _print(f"找不到语料：{corpus}")
+        return 2
+    options = None
+    if with_model:
+        config = load_config(repo_root)
+        api_key = resolve_api_key(config.review)
+        if not api_key:
+            _print(f"未配置 {config.review.api_key_env}；--with-model 需要模型调用。")
+            return 2
+        options = _review_options(config, api_key)
+    return run_quality(corpus, with_model=with_model, options=options)
 
 
 if __name__ == "__main__":
