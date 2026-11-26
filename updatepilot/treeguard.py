@@ -90,6 +90,16 @@ def assert_tree_within_limits(archive: Path, *, max_archive_bytes: int | None = 
                     raise TreeTooLargeError(
                         f"archive member escapes the extraction root: {member.name}"
                     )
+                # Links are refused outright. ``safe_join`` would stop a link that
+                # points outside the tree, but "the reviewer reads regular files" is a
+                # simpler rule to keep true than "every consumer of the extracted tree
+                # checks containment" — and a link has no legitimate role in a tree
+                # that exists to be read as text (audit S-UP-01).
+                if member.issym() or member.islnk():
+                    raise TreeTooLargeError(
+                        f"archive member is a link, which a code review cannot use: "
+                        f"{member.name}"
+                    )
                 if member.isfile():
                     if member.size > MAX_MEMBER_BYTES:
                         raise TreeTooLargeError(
