@@ -116,7 +116,29 @@ AI_REVIEW_API_KEY=sk-…
 - **secrets 不进配置文件**：YAML 里只有环境变量*名*，key 本体在 env；
 - **fail closed**：模型超时/5xx/坏 JSON → `needs_review`，永不静默通过；
 - **prompt-injection 防线写在提示词里**：文件内容中的指令性文字按可疑内容报告；
-- **bot 永不合并、永不批准**。
+- **bot 永不合并、永不批准**；
+- **审查只读仓内普通文件**：符号链接跳过，抽取的树里带链接直接拒绝——一个
+  `notes.py -> ~/.ssh/id_rsa` 否则就会变成模型输入。
+
+## 审查质量怎么量
+
+「审查好不好」曾经只能靠读评论形成印象。现在有一条可重复的度量：
+
+```bash
+python -m updatepilot.cli quality            # 确定性半场（无需 key，CI 跑的就是它）
+python -m updatepilot.cli quality --with-model   # 真模型半场（需要审查 key）
+```
+
+语料在 `tests/corpus/review_quality.jsonl`，每条标了期望结论，并分成两类：
+
+- **确定性**：模型无论答什么都不能是 `safe`（针对审查者的指令、只改锁文件、文件未读全、
+  diff 截断、安全关键面被跳过）。CI 用一个「永远答 safe」的桩模型跑真实管线，任何一条
+  被判 safe 就让构建失败——测的是代码，不是模型；
+- **模型判定**：没有结构特征的后门、外发、鉴权短路。只有真模型能抓到，因此不进 CI 门禁，
+  由 `--with-model` 报出非安全召回率与 safe 精确率。
+
+报告分两个口径（`all` / `deterministic`），因为桩模型抓不到后门是桩的问题，不是产品的
+问题——混在一起报会得到一个看着像证据、其实在测桩的数字。
 
 ## English (short)
 
