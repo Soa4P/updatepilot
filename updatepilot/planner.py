@@ -344,7 +344,14 @@ def attach_release_notes(
             if notes:
                 pr.body_lines += [
                     "",
-                    f"**{update.pin.name}** `{update.pin.current}` → `{update.latest}` 上游发布说明（best-effort）：",
+                    # Labelled, not just pasted: this text is written by a third party and
+                    # lands in a PR this bot signs. Saying so is what makes a reader treat it
+                    # as data (audit S-UP-06); the HTML comments and tags are stripped before
+                    # it gets here, in registries.sanitize_release_notes.
+                    (
+                        f"**{update.pin.name}** `{update.pin.current}` → `{update.latest}` "
+                        "上游发布说明（第三方原文，未经本仓库审核；markdown 之外的内容已剔除）："
+                    ),
                     "",
                     notes,
                 ]

@@ -86,7 +86,33 @@ AI_REVIEW_API_KEY=sk-…
    [example/updatepilot.yml](example/updatepilot.yml)，不放则用默认值。
 
 要在每个 PR（不限 bot 开的）上跑审查，用 `mode: review` 配 `pull_request_target`
-触发（需 `PR_NUMBER` 环境，action 已自动传入）。
+触发（需 `PR_NUMBER` 环境，action 已自动传入）。这条组合有一个**必须照抄的部分**：
+checkout 要钉在 base commit 上。
+
+```yaml
+on: pull_request_target
+permissions:
+  contents: read          # review 只读仓库；写 PR 评论需要 pull-requests: write
+  pull-requests: write
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      # 钉 base，不是 PR head：pull_request_target 带着 secrets 运行，checkout 到 PR head
+      # 等于让 PR 作者决定「跑哪个程序、用哪份 .github/updatepilot.yml」。
+      - uses: actions/checkout@<commit-sha>
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+      - uses: Soa4P/updatepilot@v1
+        with:
+          mode: review
+        env:
+          AI_REVIEW_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
+```
+
+action 自己也会拦一次：`review` 模式下如果发现工作区 HEAD 就是 PR head commit，直接
+失败并打印正确写法 —— 那种配置下被审查的 PR 有能力改写正在审查它的程序（审计 S-UP-05）。
+PR 的 diff 与文件树始终是**当成文本读**的（`gh pr diff` + `git archive` 抽取），从不执行。
 
 ## 策略（`.github/updatepilot.yml`）
 
