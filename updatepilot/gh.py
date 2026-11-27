@@ -110,7 +110,18 @@ def comment_on_pr(cwd: Path, number: int, body: str) -> None:
 
 
 def label_pr(cwd: Path, number: int, label: str, color: str) -> None:
-    _run(["gh", "label", "create", label, "--color", color, "--force"], cwd=cwd, check=False)
+    created = _run(
+        ["gh", "label", "create", label, "--color", color, "--force"],
+        cwd=cwd, check=False,
+    )
+    if created.returncode != 0:
+        # Same reason as create_issue (S-UP-13): the swallowed failure used to resurface
+        # as an unhelpful error from the edit call below.
+        print(
+            f"::warning::label create failed (exit {created.returncode}): "
+            f"{created.stderr.strip()[:300]}",
+            flush=True,
+        )
     _run(["gh", "pr", "edit", str(number), "--add-label", label], cwd=cwd)
 
 
@@ -165,10 +176,42 @@ def latest_audit_issue(cwd: Path, label: str) -> tuple[int, str] | None:
 
 
 def create_issue(cwd: Path, *, title: str, body: str, label: str, color: str) -> int:
-    _run(["gh", "label", "create", label, "--color", color, "--force"], cwd=cwd, check=False)
+    """Create a labelled issue and make sure the label actually landed.
+
+    Two ways this used to go quietly wrong (S-UP-13):
+
+    * ``gh label create`` ran with ``check=False``, so a missing ``issues: write``
+      permission surfaced only later as an unhelpful parse error from the create call.
+      The reason is now printed before the louder failure.
+    * The next run's dedup looks this issue up **by label**; an issue created without
+      its label is invisible to that lookup, so dedup would silently degrade to
+      "everything is new" every run. The label is verified after creation and a missing
+      one is attached explicitly — an unattachable label is a loud failure, not a
+      degraded audit.
+    """
+    created = _run(
+        ["gh", "label", "create", label, "--color", color, "--force"],
+        cwd=cwd, check=False,
+    )
+    if created.returncode != 0:
+        print(
+            f"::warning::label create failed (exit {created.returncode}): "
+            f"{created.stderr.strip()[:300]}",
+            flush=True,
+        )
     result = _run(["gh", "issue", "create", "--title", title, "--body", body,
                    "--label", label], cwd=cwd)
     for token in reversed(result.stdout.strip().split("/")):
         if token.isdigit():
-            return int(token)
-    raise GitError(f"could not parse issue number from gh output: {result.stdout!r}")
+            number = int(token)
+            break
+    else:
+        raise GitError(f"could not parse issue number from gh output: {result.stdout!r}")
+    labels = _run(
+        ["gh", "issue", "view", str(number), "--json", "labels", "--jq",
+         '[.labels[].name]'],
+        cwd=cwd, check=False,
+    )
+    if label not in labels.stdout:
+        _run(["gh", "issue", "edit", str(number), "--add-label", label], cwd=cwd)
+    return number

@@ -114,6 +114,35 @@ action 自己也会拦一次：`review` 模式下如果发现工作区 HEAD 就�
 失败并打印正确写法 —— 那种配置下被审查的 PR 有能力改写正在审查它的程序（审计 S-UP-05）。
 PR 的 diff 与文件树始终是**当成文本读**的（`gh pr diff` + `git archive` 抽取），从不执行。
 
+**audit 模式**（仓库巡检）写的是 issue，不是分支——权限面不一样，照抄 scan 模板的
+`contents: write` 既给多了又缺 `issues: write`（审计 S-UP-13）：
+
+```yaml
+on:
+  schedule:
+    - cron: "23 5 * * 3"   # 每周三
+  workflow_dispatch:
+
+permissions:
+  contents: read           # 巡检只读仓库
+  issues: write            # 产出是带标签的 issue（含建标签）
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<commit-sha>
+      - uses: Soa4P/updatepilot@v1
+        with:
+          mode: audit
+        env:
+          AI_REVIEW_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
+```
+
+三种模式的权限对照：`scan` 要 `contents: write`（开分支推提交）+ `pull-requests: write`；
+`review` 只要 `contents: read` + `pull-requests: write`；`audit` 只要 `contents: read` +
+`issues: write`。**多给 `contents: write` 不是兼容性余量，是把「bot 可以改你的仓库」
+送给了本来不需要它的模式。**
+
 ## 策略（`.github/updatepilot.yml`）
 
 | 项 | 默认 | 说明 |
